@@ -17,8 +17,12 @@ ENV NODE_ENV=production
 ENV BIND_ADDRESS=0.0.0.0
 COPY --from=deps /app/node_modules node_modules
 COPY --from=deps /app/packages/backend/node_modules packages/backend/node_modules
+COPY --from=build /app/package.json package.json
+COPY --from=build /app/package-lock.json package-lock.json
+COPY --from=build /app/turbo.json turbo.json
 COPY --from=build /app/packages/shared/dist packages/shared/dist
 COPY --from=build /app/packages/backend/dist packages/backend/dist
+COPY --from=build /app/packages/backend/src packages/backend/src
 COPY --from=build /app/packages/shared/package.json packages/shared/package.json
 COPY --from=build /app/packages/backend/package.json packages/backend/package.json
 EXPOSE 3001
