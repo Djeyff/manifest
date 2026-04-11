@@ -16,10 +16,12 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV BIND_ADDRESS=0.0.0.0
 COPY --from=deps /app/node_modules node_modules
+COPY --from=deps /app/packages/backend/node_modules packages/backend/node_modules
+COPY --from=deps /app/packages/shared/node_modules packages/shared/node_modules
 COPY --from=build /app/packages/shared/dist packages/shared/dist
 COPY --from=build /app/packages/backend/dist packages/backend/dist
-COPY packages/shared/package.json packages/shared/
-COPY packages/backend/package.json packages/backend/
+COPY --from=build /app/packages/shared/package.json packages/shared/package.json
+COPY --from=build /app/packages/backend/package.json packages/backend/package.json
 EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://127.0.0.1:3001/api/v1/health || exit 1
