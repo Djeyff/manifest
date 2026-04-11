@@ -23,6 +23,9 @@ COPY --from=build /app/turbo.json turbo.json
 COPY --from=build /app/packages/shared/dist packages/shared/dist
 COPY --from=build /app/packages/backend/dist packages/backend/dist
 COPY --from=build /app/packages/backend/src packages/backend/src
+COPY --from=build /app/packages/backend/tsconfig.json packages/backend/tsconfig.json
+COPY --from=build /app/packages/backend/tsconfig.build.json packages/backend/tsconfig.build.json
+COPY --from=build /app/packages/backend/nest-cli.json packages/backend/nest-cli.json
 COPY --from=build /app/packages/shared/package.json packages/shared/package.json
 COPY --from=build /app/packages/backend/package.json packages/backend/package.json
 EXPOSE 3001
