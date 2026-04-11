@@ -10,6 +10,7 @@ on:
       - "package.json"
       - "package-lock.json"
       - "turbo.json"
+      - ".github/workflows/docker-actions.yml"
   workflow_dispatch:
     inputs:
       version:
@@ -25,6 +26,7 @@ on:
       - "package.json"
       - "package-lock.json"
       - "turbo.json"
+      - ".github/workflows/docker-actions.yml"
 
 permissions:
   contents: read
