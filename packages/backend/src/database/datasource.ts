@@ -1,7 +1,15 @@
 import 'dotenv/config';
+import { join } from 'node:path';
 import { DataSource } from 'typeorm';
 
 const isLocalMode = process.env['MANIFEST_MODE'] === 'local';
+const isCompiledRuntime = __dirname.includes('/dist/');
+const entitiesGlob = isCompiledRuntime
+  ? join(__dirname, '..', 'entities', '!(*.spec).js')
+  : join(__dirname, '..', 'entities', '!(*.spec).ts');
+const migrationsGlob = isCompiledRuntime
+  ? join(__dirname, 'migrations', '!(*.spec).js')
+  : join(__dirname, 'migrations', '!(*.spec).ts');
 
 function createDataSource(): DataSource {
   if (isLocalMode) {
@@ -10,7 +18,7 @@ function createDataSource(): DataSource {
       type: 'sqljs',
       location: dbPath === ':memory:' ? undefined : dbPath,
       autoSave: dbPath !== ':memory:',
-      entities: ['src/entities/!(*.spec).ts'],
+      entities: [entitiesGlob],
       synchronize: true,
     });
   }
@@ -23,8 +31,8 @@ function createDataSource(): DataSource {
   return new DataSource({
     type: 'postgres',
     url: databaseUrl,
-    entities: ['src/entities/!(*.spec).ts'],
-    migrations: ['src/database/migrations/!(*.spec).ts'],
+    entities: [entitiesGlob],
+    migrations: [migrationsGlob],
   });
 }
 
