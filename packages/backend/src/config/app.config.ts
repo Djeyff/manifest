@@ -42,4 +42,9 @@ export const appConfig = registerAs('app', () => ({
   notificationFromEmail: process.env['NOTIFICATION_FROM_EMAIL'] ?? 'noreply@manifest.build',
   pluginOtlpEndpoint: process.env['PLUGIN_OTLP_ENDPOINT'] ?? '',
   dbPoolMax: Number(process.env['DB_POOL_MAX'] ?? 20),
+  openvikingUrl: process.env['OPENVIKING_URL'] ?? '',
+  openvikingApiKey: process.env['OPENVIKING_API_KEY'] ?? '',
+  openvikingAccount: process.env['OPENVIKING_ACCOUNT'] ?? '',
+  openvikingUser: process.env['OPENVIKING_USER'] ?? '',
+  openvikingAgentId: process.env['OPENVIKING_AGENT_ID'] ?? '',
 }));
