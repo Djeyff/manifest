@@ -23,6 +23,7 @@ COPY --from=build /app/turbo.json turbo.json
 COPY --from=build /app/packages/shared/dist packages/shared/dist
 COPY --from=build /app/packages/backend/dist packages/backend/dist
 COPY --from=build /app/packages/backend/src packages/backend/src
+COPY --from=build /app/packages/backend/scripts packages/backend/scripts
 COPY --from=build /app/packages/backend/tsconfig.json packages/backend/tsconfig.json
 COPY --from=build /app/packages/backend/tsconfig.build.json packages/backend/tsconfig.build.json
 COPY --from=build /app/packages/backend/nest-cli.json packages/backend/nest-cli.json
@@ -31,4 +32,4 @@ COPY --from=build /app/packages/backend/package.json packages/backend/package.js
 EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://127.0.0.1:3001/api/v1/health || exit 1
-CMD ["node", "packages/backend/dist/main.js"]
+CMD ["npm", "run", "start:with-migrations", "--workspace=packages/backend"]
