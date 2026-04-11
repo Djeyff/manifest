@@ -2,9 +2,7 @@ const { spawn } = require('node:child_process');
 const path = require('node:path');
 
 async function run() {
-  const backendRoot = __dirname.startsWith('/app/')
-    ? __dirname
-    : path.resolve(__dirname, '..');
+  const backendRoot = path.resolve(__dirname, '..');
 
   const datasourceModule = path.join(backendRoot, 'dist', 'database', 'datasource.js');
   const { default: dataSource } = require(datasourceModule);
