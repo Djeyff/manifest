@@ -51,8 +51,18 @@ export function convertContent(content: unknown, role: string): unknown {
 
   if (!Array.isArray(content)) return content;
 
-  return (content as { type?: string; text?: string }[]).map((part) => {
+  return (content as Record<string, unknown>[]).map((part) => {
+    if (!isObjectRecord(part)) return part;
     if (part.type === 'text') return { ...part, type: partType };
+
+    if (part.type === 'image_url') {
+      const imageUrl = isObjectRecord(part.image_url) ? part.image_url.url : part.image_url;
+      if (typeof imageUrl !== 'string' || !imageUrl) {
+        return { type: 'input_image', image_url: '' };
+      }
+      return { type: 'input_image', image_url: imageUrl };
+    }
+
     return part;
   });
 }

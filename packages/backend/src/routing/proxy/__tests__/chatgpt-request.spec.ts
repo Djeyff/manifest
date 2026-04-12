@@ -113,7 +113,18 @@ describe('ChatGPT Adapter – toResponsesRequest', () => {
     const input = result.input as { content: { type: string }[] }[];
 
     expect(input[0].content[0].type).toBe('input_text');
-    expect(input[0].content[1].type).toBe('image_url');
+    expect(input[0].content[1].type).toBe('input_image');
+    expect((input[0].content[1] as { image_url: string }).image_url).toBe('http://example.com/img.png');
+  });
+
+  it('forces stream=true even when the incoming body sets stream=false', () => {
+    const body = {
+      stream: false,
+      messages: [{ role: 'user', content: 'Hello world' }],
+    };
+    const result = toResponsesRequest(body, 'gpt-5');
+
+    expect(result.stream).toBe(true);
   });
 
   it('filters system and developer messages from input array', () => {

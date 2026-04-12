@@ -59,7 +59,7 @@ export function toResponsesRequest(
   const request: Record<string, unknown> = {
     model,
     input,
-    stream: body.stream !== false,
+    stream: true,
     store: false,
     instructions: extractInstructions(messages),
   };
