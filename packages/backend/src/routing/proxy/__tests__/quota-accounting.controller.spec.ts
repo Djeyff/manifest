@@ -13,6 +13,16 @@ describe('QuotaAccountingController — GET /api/v1/quota-accounting', () => {
         attempted_est_tokens: 3456,
         consumed_requests: 9,
         consumed_tokens: 2100,
+        aborted_requests: 2,
+        aborted_est_tokens: 480,
+        updated_at: '2026-10-30T10:30:00.000Z',
+      },
+    },
+    agents: {
+      constos: {
+        aborts_before_dispatch: 1,
+        aborts_after_dispatch: 2,
+        abort_billed_est_tokens: 480,
         updated_at: '2026-10-30T10:30:00.000Z',
       },
     },
@@ -22,11 +32,14 @@ describe('QuotaAccountingController — GET /api/v1/quota-accounting', () => {
     const controller = new QuotaAccountingController({ snapshot: () => snapshot } as never);
     expect(controller.getQuotaAccounting()).toEqual(snapshot);
     expect(controller.getQuotaAccounting().providers['openai'].attempted_requests).toBe(12);
+    // Abort-burn telemetry (D-2026-10-30-11) rides the same passthrough.
+    expect(controller.getQuotaAccounting().providers['openai'].aborted_requests).toBe(2);
+    expect(controller.getQuotaAccounting().agents['constos'].aborts_after_dispatch).toBe(2);
   });
 
-  it('returns an empty provider map when accounting is absent (optional-injected)', () => {
+  it('returns empty maps when accounting is absent (optional-injected)', () => {
     const controller = new QuotaAccountingController();
-    expect(controller.getQuotaAccounting()).toEqual({ providers: {} });
+    expect(controller.getQuotaAccounting()).toEqual({ providers: {}, agents: {} });
   });
 
   it('is @Public — the day-deck reads it without an agent key', () => {

@@ -730,6 +730,15 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       provider_key_label: opts.attemptStart?.keyLabel ?? null,
       error_message: null,
       error_http_status: null,
+      // D-2026-10-30-11: burn visibility for the last attempt when it had
+      // already been dispatched (the provider bills it). Absent entirely for
+      // undispatched attempts — cancelled rows keep NO error fields.
+      ...(opts.attempt?.dispatch?.dispatchedAtMs
+        ? {
+            abort_billed: true,
+            abort_est_tokens: Math.ceil((opts.attempt.dispatch?.wireBodyChars ?? 0) / 4),
+          }
+        : {}),
     });
     await this.persistRequest(ctx, opts.requestId, row, true, undefined, opts.apiMode);
     if (opts.attempt) await this.persistAttempt(row, opts.attempt);
@@ -743,11 +752,22 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
    * `pending` forever. Only rows still pending are touched: a terminal write
    * that already landed keeps its real outcome. Updates run in parallel and a
    * failed one never stops the rest.
+   *
+   * Returns the attempts it actually transitioned, so the controller can count
+   * abort-burn (D-2026-10-30-11) without double counting legs that already
+   * reached a terminal writer.
    */
-  async cancelPendingProviderAttempts(attempts: ProviderAttemptRef[]): Promise<void> {
+  async cancelPendingProviderAttempts(
+    attempts: ProviderAttemptRef[],
+  ): Promise<ProviderAttemptRef[]> {
+    const cancelled: ProviderAttemptRef[] = [];
     await Promise.all(
       attempts.map(async (attempt) => {
         if (!(await attempt.pendingWrite.catch(() => false))) return;
+        // D-2026-10-30-11: an attempt that had ALREADY been dispatched when
+        // the caller vanished was billed by the provider — say so on the row
+        // (dedicated nullable columns; cancelled rows keep NO error fields).
+        const dispatched = attempt.dispatch?.dispatchedAtMs;
         await this.messageRepo
           .update(
             { id: attempt.id, status: PENDING_STATUS },
@@ -757,11 +777,21 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
               error_code: null,
               error_http_status: null,
               duration_ms: Math.max(0, (attempt.completedAtMs ?? Date.now()) - attempt.startedAtMs),
+              ...(dispatched
+                ? {
+                    abort_billed: true,
+                    abort_est_tokens: Math.ceil((attempt.dispatch?.wireBodyChars ?? 0) / 4),
+                  }
+                : {}),
             },
           )
+          .then(() => {
+            cancelled.push(attempt);
+          })
           .catch((e) => this.logger.warn(`Failed to cancel Provider Attempt ${attempt.id}: ${e}`));
       }),
     );
+    return cancelled;
   }
 
   /** Complete an intermediate provider call that is retried below the proxy layer. */

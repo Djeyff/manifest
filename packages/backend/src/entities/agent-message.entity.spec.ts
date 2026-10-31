@@ -23,4 +23,19 @@ describe('AgentMessage schema mapping', () => {
     expect(column('request_id')?.nullable).toBe(true);
     expect(column('attempt_number')?.nullable).toBe(true);
   });
+
+  it('carries abort-billing telemetry as nullable columns (D-2026-10-30-11)', () => {
+    const columns = getMetadataArgsStorage().columns.filter(
+      (entry) => entry.target === AgentMessage,
+    );
+    const column = (propertyName: string) =>
+      columns.find((entry) => entry.propertyName === propertyName)?.options;
+
+    // Burn visibility for client-aborted provider attempts rides on dedicated
+    // nullable columns — cancelled rows keep NO error fields (glossary).
+    expect(column('abort_billed')?.nullable).toBe(true);
+    expect(column('abort_billed')?.type).toBe('boolean');
+    expect(column('abort_est_tokens')?.nullable).toBe(true);
+    expect(column('abort_est_tokens')?.type).toBe('integer');
+  });
 });

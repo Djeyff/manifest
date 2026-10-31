@@ -289,7 +289,7 @@ describe('ProxyMessageRecorder', () => {
 
       await expect(
         recorder.cancelPendingProviderAttempts([attempt('first'), attempt('second')]),
-      ).resolves.toBeUndefined();
+      ).resolves.toEqual([expect.objectContaining({ id: 'second' })]);
 
       expect(updateMock).toHaveBeenCalledWith(
         { id: 'second', status: 'pending' },

@@ -40,11 +40,36 @@ export interface QuotaProviderAccounting {
   attempted_est_tokens: number;
   consumed_requests: number;
   consumed_tokens: number;
+  /**
+   * Client-aborted attempts that had ALREADY been dispatched upstream
+   * (D-2026-10-30-11): the provider bills the attempt even though no usage
+   * ever arrives, so this is the burn slice OF attempted_requests. Zeroed on
+   * window roll like every other window counter.
+   */
+  aborted_requests: number;
+  aborted_est_tokens: number;
   updated_at: string;
 }
 
 export interface QuotaAccountingSnapshot {
   providers: Record<string, QuotaProviderAccounting>;
+  /**
+   * Cumulative per-agent abort counters (D-2026-10-30-11). Not window-bound:
+   * abort behavior is a per-agent property, not a provider-window property.
+   * Keyed by agent name (the routing layer's ingestionContext.agentName).
+   */
+  agents: Record<string, QuotaAgentAbortAccounting>;
+}
+
+/** Which side of the upstream dispatch a client abort landed on. */
+export type AbortTiming = 'before_dispatch' | 'after_dispatch';
+
+export interface QuotaAgentAbortAccounting {
+  aborts_before_dispatch: number;
+  aborts_after_dispatch: number;
+  /** Estimated input tokens of the aborted-but-dispatched (billed) attempts. */
+  abort_billed_est_tokens: number;
+  updated_at: string;
 }
 
 /** Provider keys are case-insensitive: `OpenAI` and `openai` are one window. */
@@ -79,6 +104,8 @@ function emptyEntry(nowMs: number): QuotaProviderAccounting {
     attempted_est_tokens: 0,
     consumed_requests: 0,
     consumed_tokens: 0,
+    aborted_requests: 0,
+    aborted_est_tokens: 0,
     updated_at: now,
   };
 }
@@ -114,6 +141,8 @@ export function rollIfExpired(
   entry.attempted_est_tokens = 0;
   entry.consumed_requests = 0;
   entry.consumed_tokens = 0;
+  entry.aborted_requests = 0;
+  entry.aborted_est_tokens = 0;
   entry.window_start = new Date(nowMs).toISOString();
   entry.window_flush_at = null;
   entry.updated_at = entry.window_start;
@@ -148,6 +177,65 @@ export function applyConsumed(
   entry.updated_at = new Date(nowMs).toISOString();
 }
 
+/** Get (creating if needed) the cumulative abort entry for an agent. */
+export function agentAbortEntryFor(
+  state: QuotaAccountingSnapshot,
+  agentName: string,
+  nowMs: number,
+): QuotaAgentAbortAccounting {
+  let entry = state.agents[agentName];
+  if (!entry) {
+    entry = {
+      aborts_before_dispatch: 0,
+      aborts_after_dispatch: 0,
+      abort_billed_est_tokens: 0,
+      updated_at: new Date(nowMs).toISOString(),
+    };
+    state.agents[agentName] = entry;
+  }
+  return entry;
+}
+
+/**
+ * Count one client-aborted provider attempt (D-2026-10-30-11).
+ * after_dispatch → the provider bills the attempt (burn slice of attempted);
+ * before_dispatch → nothing was sent, no provider burn. The agent's
+ * cumulative counters see both timings.
+ */
+export function applyAbort(
+  state: QuotaAccountingSnapshot,
+  provider: string,
+  timing: AbortTiming,
+  estTokens: number,
+  nowMs: number,
+): void {
+  rollIfExpired(state, provider, nowMs);
+  const entry = entryFor(state, provider, nowMs);
+  if (timing === 'after_dispatch') {
+    entry.aborted_requests += 1;
+    entry.aborted_est_tokens += Math.max(0, Math.trunc(estTokens) || 0);
+  }
+  entry.updated_at = new Date(nowMs).toISOString();
+}
+
+/** Accumulate one abort into an agent's cumulative counters (both timings). */
+export function applyAgentAbort(
+  state: QuotaAccountingSnapshot,
+  agentName: string,
+  timing: AbortTiming,
+  estTokens: number,
+  nowMs: number,
+): void {
+  const entry = agentAbortEntryFor(state, agentName, nowMs);
+  if (timing === 'after_dispatch') {
+    entry.aborts_after_dispatch += 1;
+    entry.abort_billed_est_tokens += Math.max(0, Math.trunc(estTokens) || 0);
+  } else {
+    entry.aborts_before_dispatch += 1;
+  }
+  entry.updated_at = new Date(nowMs).toISOString();
+}
+
 export type WindowFlushOutcome = 'unchanged' | 'adopted' | 'rolled';
 
 /**
@@ -172,6 +260,8 @@ export function applyWindowFlush(
     entry.attempted_est_tokens = 0;
     entry.consumed_requests = 0;
     entry.consumed_tokens = 0;
+    entry.aborted_requests = 0;
+    entry.aborted_est_tokens = 0;
   }
   // Both adoption and roll re-stamp window_start to the observed instant.
   entry.window_start = new Date(nowMs).toISOString();

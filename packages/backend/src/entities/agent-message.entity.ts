@@ -127,6 +127,21 @@ export class AgentMessage {
   @Column('varchar', { nullable: true })
   description!: string | null;
 
+  /**
+   * Client-abort billing telemetry (D-2026-10-30-11). True when the caller
+   * disconnected AFTER this attempt was dispatched upstream — the provider
+   * bills the attempt even though the row stays `cancelled` with zero real
+   * usage. NULL on every non-abort row. Cancelled rows keep NO error fields
+   * (docs/glossary.md contract), so burn visibility rides on these dedicated
+   * nullable columns instead of the error taxonomy.
+   */
+  @Column('boolean', { nullable: true })
+  abort_billed!: boolean | null;
+
+  /** Estimated input tokens (ceil(serialized wire body chars / 4)) at abort. */
+  @Column('integer', { nullable: true })
+  abort_est_tokens!: number | null;
+
   @Column('varchar', { nullable: true })
   service_type!: string | null;
 
