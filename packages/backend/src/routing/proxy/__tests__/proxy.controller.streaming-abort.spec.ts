@@ -271,3 +271,185 @@ describe('ProxyController streaming abort', () => {
     expect(mockMessageRepo.insert).not.toHaveBeenCalled();
   });
 });
+
+describe('ProxyController abort-burn telemetry (D-2026-10-30-11)', () => {
+  let proxyService: { proxyRequest: jest.Mock };
+  let rateLimiter: {
+    checkLimit: jest.Mock;
+    checkIpLimit: jest.Mock;
+    recordSuccess: jest.Mock;
+    acquireSlot: jest.Mock;
+    releaseSlot: jest.Mock;
+  };
+  let mockMessageRepo: {
+    insert: jest.Mock;
+    update: jest.Mock;
+    findOne: jest.Mock;
+    find: jest.Mock;
+  };
+  let quotaAccounting: { recordAbort: jest.Mock; recordAttempt: jest.Mock; recordConsumed: jest.Mock };
+  let controller: ProxyController;
+  let recorder: ProxyMessageRecorder;
+  let warnSpy: jest.SpyInstance;
+  let logSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    proxyService = { proxyRequest: jest.fn() };
+    rateLimiter = {
+      checkLimit: jest.fn(),
+      checkIpLimit: jest.fn(),
+      recordSuccess: jest.fn(),
+      acquireSlot: jest.fn(),
+      releaseSlot: jest.fn(),
+    };
+    mockMessageRepo = {
+      insert: jest.fn().mockResolvedValue({}),
+      update: jest.fn().mockResolvedValue({}),
+      findOne: jest.fn().mockResolvedValue(null),
+      find: jest.fn().mockResolvedValue([]),
+    };
+    quotaAccounting = {
+      recordAbort: jest.fn(),
+      recordAttempt: jest.fn(),
+      recordConsumed: jest.fn(),
+    };
+    const pricingCache = { getByModel: jest.fn().mockReturnValue(undefined) };
+    recorder = new ProxyMessageRecorder(
+      mockMessageRepo as never,
+      pricingCache as never,
+      { emit: jest.fn() } as unknown as IngestEventBusService,
+      {
+        canonicalizeAgentMessageKeys: jest
+          .fn()
+          .mockImplementation(async (_a: string, provider: string | null, model: string | null) => ({
+            provider: provider ?? null,
+            model: model ?? null,
+          })),
+      } as never,
+      {
+        getCostPerRequest: jest.fn().mockReturnValue(null),
+        resolveCostPerRequest: jest.fn().mockResolvedValue(null),
+      } as never,
+    );
+    controller = new ProxyController(
+      proxyService as never,
+      rateLimiter as never,
+      {
+        convertGoogleResponse: jest.fn(),
+        convertGoogleStreamChunk: jest.fn(),
+        convertAnthropicResponse: jest.fn(),
+        convertAnthropicStreamChunk: jest.fn(),
+      } as never,
+      recorder,
+      new ThoughtSignatureCache(),
+      new ThinkingBlockCache(),
+      new ReasoningContentCache(),
+      { getModelsForAgent: jest.fn().mockResolvedValue([]) } as never,
+      { assertWithinRequestLimit: jest.fn().mockResolvedValue(undefined) } as never,
+      { report: jest.fn() } as never,
+      { getCapabilities: jest.fn().mockResolvedValue(null) } as never,
+      {
+        lookupModel: jest.fn().mockReturnValue(null),
+        lookupModelCapabilities: jest.fn().mockReturnValue(null),
+      } as never,
+      undefined,
+      undefined,
+      quotaAccounting as never,
+    );
+    const logger = (
+      controller as unknown as {
+        logger: { warn: (msg: string) => void; log: (msg: string) => void };
+      }
+    ).logger;
+    warnSpy = jest.spyOn(logger, 'warn');
+    logSpy = jest.spyOn(logger, 'log');
+  });
+
+  afterEach(() => {
+    recorder.onModuleDestroy();
+    jest.restoreAllMocks();
+  });
+
+  type StartAttemptFn = (
+    start: { provider: string; model: string; authType?: string },
+  ) => { dispatch?: unknown };
+
+  async function driveAbort(wireAttempt?: (startProviderAttempt: StartAttemptFn) => void): Promise<void> {
+    proxyService.proxyRequest.mockImplementation(
+      (opts: { signal: AbortSignal; startProviderAttempt?: StartAttemptFn }) =>
+        new Promise((_resolve, reject) => {
+          if (wireAttempt && opts.startProviderAttempt) {
+            wireAttempt(opts.startProviderAttempt);
+          }
+          opts.signal.addEventListener('abort', () => reject(new Error('aborted')));
+        }),
+    );
+    const req = mockRequest({ messages: [{ role: 'user', content: 'hi' }], stream: true });
+    const { res } = mockResponse();
+    let closeListener: (() => void) | undefined;
+    (res.once as jest.Mock).mockImplementation((event: string, cb: () => void) => {
+      if (event === 'close') closeListener = cb;
+    });
+    const handlerPromise = controller.chatCompletions(req as never, res as never);
+    // Wire-up beat, then fire the socket close — same sequence as the base
+    // streaming-abort tests (the handler only resolves once the abort fires).
+    await new Promise((r) => setImmediate(r));
+    if (!closeListener) throw new Error('close listener was not wired');
+    closeListener!();
+    await handlerPromise;
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  }
+
+  it('counts an AFTER-dispatch abort as provider-billed burn with est tokens', async () => {
+    await driveAbort((startProviderAttempt) => {
+      const attempt = startProviderAttempt({
+        provider: 'zai',
+        model: 'glm-4.6',
+        authType: 'api_key',
+      });
+      // The provider-client stamps this beside the B2 recordAttempt call; the
+      // controller test simulates the stamped capture directly.
+      attempt.dispatch = { provider: 'zai', wireBodyChars: 1234, dispatchedAtMs: Date.now() };
+    });
+
+    expect(quotaAccounting.recordAbort).toHaveBeenCalledWith(
+      'test-agent',
+      'zai',
+      'after_dispatch',
+      309, // ceil(1234 / 4)
+    );
+    expect(mockMessageRepo.update).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'pending' }),
+      expect.objectContaining({ status: 'cancelled', abort_billed: true, abort_est_tokens: 309 }),
+    );
+    expect(
+      warnSpy.mock.calls.some((call) => String(call[0]).includes('AFTER dispatch')),
+    ).toBe(true);
+    expect(rateLimiter.releaseSlot).toHaveBeenCalledWith('tenant-1');
+  });
+
+  it('counts an abort BEFORE dispatch distinctly with zero burn', async () => {
+    await driveAbort((startProviderAttempt) => {
+      // No dispatch capture: the attempt never reached executeFetch.
+      startProviderAttempt({ provider: 'zai', model: 'glm-4.6', authType: 'api_key' });
+    });
+
+    expect(quotaAccounting.recordAbort).toHaveBeenCalledWith('test-agent', '', 'before_dispatch', 0);
+    const payload = mockMessageRepo.update.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(payload?.abort_billed).toBeUndefined();
+    expect(logSpy.mock.calls.some((call) => String(call[0]).includes('before dispatch'))).toBe(
+      true,
+    );
+    expect(warnSpy.mock.calls.some((call) => String(call[0]).includes('AFTER dispatch'))).toBe(
+      false,
+    );
+  });
+
+  it('records a request-level before-dispatch abort when no attempt ever started', async () => {
+    await driveAbort(); // proxyRequest never creates an attempt
+
+    expect(quotaAccounting.recordAbort).toHaveBeenCalledWith('test-agent', '', 'before_dispatch', 0);
+    expect(mockMessageRepo.update).not.toHaveBeenCalled();
+  });
+});

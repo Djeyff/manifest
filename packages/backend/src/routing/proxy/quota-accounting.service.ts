@@ -2,13 +2,17 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from '@ne
 import { readFileSync, renameSync, writeFileSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
 import {
+  applyAbort,
+  applyAgentAbort,
   applyAttempt,
   applyConsumed,
   applyWindowFlush,
   normalizeProviderKey,
   QUOTA_ACCOUNTING_FILE_DEFAULT,
   QUOTA_ACCOUNTING_FLUSH_DEBOUNCE_MS,
+  AbortTiming,
   QuotaAccountingSnapshot,
+  QuotaAgentAbortAccounting,
   QuotaProviderAccounting,
   QuotaUsageShape,
   setQuotaAccountingHooks,
@@ -28,7 +32,7 @@ import {
 @Injectable()
 export class QuotaAccountingService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(QuotaAccountingService.name);
-  private readonly state: QuotaAccountingSnapshot = { providers: {} };
+  private readonly state: QuotaAccountingSnapshot = { providers: {}, agents: {} };
   private readonly filePath: string;
   private persistTimer?: ReturnType<typeof setTimeout>;
   private persistDegraded = false;
@@ -67,6 +71,29 @@ export class QuotaAccountingService implements OnModuleInit, OnModuleDestroy {
   recordConsumed(provider: string, usage?: QuotaUsageShape | null): void {
     try {
       applyConsumed(this.state, provider, usage, Date.now());
+      this.schedulePersist();
+    } catch (e) {
+      this.warnDegrade(e);
+    }
+  }
+
+  /**
+   * One client-aborted provider attempt (D-2026-10-30-11). after_dispatch
+   * means the provider bills the attempt (burn slice of attempted);
+   * before_dispatch means nothing was ever sent. Both timings count on the
+   * agent's cumulative map when the agent is known; provider burn is only
+   * counted for a real (non-empty) provider.
+   */
+  recordAbort(
+    agentName: string | null | undefined,
+    provider: string,
+    timing: AbortTiming,
+    estTokens: number,
+  ): void {
+    try {
+      const now = Date.now();
+      if (provider) applyAbort(this.state, provider, timing, estTokens, now);
+      if (agentName) applyAgentAbort(this.state, agentName, timing, estTokens, now);
       this.schedulePersist();
     } catch (e) {
       this.warnDegrade(e);
@@ -126,7 +153,10 @@ export class QuotaAccountingService implements OnModuleInit, OnModuleDestroy {
   }
 
   private loadFromDisk(): void {
-    let parsed: { providers?: Record<string, QuotaProviderAccounting> };
+    let parsed: {
+      providers?: Record<string, QuotaProviderAccounting>;
+      agents?: Record<string, QuotaAgentAbortAccounting>;
+    };
     try {
       parsed = JSON.parse(readFileSync(this.filePath, 'utf8'));
     } catch {
@@ -144,6 +174,21 @@ export class QuotaAccountingService implements OnModuleInit, OnModuleDestroy {
           attempted_est_tokens: 0,
           consumed_requests: 0,
           consumed_tokens: 0,
+          aborted_requests: 0,
+          aborted_est_tokens: 0,
+          updated_at: new Date(now).toISOString(),
+        },
+        ...entry,
+      };
+    }
+    // Pre-abort state files have no agents map — default it to empty.
+    for (const [name, entry] of Object.entries(parsed?.agents ?? {})) {
+      if (!entry || typeof entry !== 'object') continue;
+      this.state.agents[name] = {
+        ...{
+          aborts_before_dispatch: 0,
+          aborts_after_dispatch: 0,
+          abort_billed_est_tokens: 0,
           updated_at: new Date(now).toISOString(),
         },
         ...entry,

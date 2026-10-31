@@ -18,6 +18,6 @@ export class QuotaAccountingController {
   @Public()
   @Get()
   getQuotaAccounting(): QuotaAccountingSnapshot {
-    return this.quotaAccounting?.snapshot() ?? { providers: {} };
+    return this.quotaAccounting?.snapshot() ?? { providers: {}, agents: {} };
   }
 }

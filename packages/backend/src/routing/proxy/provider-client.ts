@@ -517,6 +517,7 @@ export class ProviderClient {
             opts.apiMode === 'responses' ? responsesToolNames(body.tools) : undefined,
         },
         opts.provider,
+        attempt,
       );
       const response =
         !stream &&
@@ -978,6 +979,7 @@ export class ProviderClient {
       responsesToolNames?: ResponsesToolNames;
     },
     provider: string,
+    attempt?: ProviderAttemptRef,
   ): Promise<ForwardResult> {
     let fetchSignal: AbortSignal;
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -1008,6 +1010,21 @@ export class ProviderClient {
       this.quotaAccounting?.recordAttempt(provider, wireBody);
     } catch {
       // accounting failures must never break the forward
+    }
+    // Abort-billing capture (D-2026-10-30-11): stamp the dispatch instant on
+    // the attempt beside the B2 attempt count, so a later client abort
+    // classifies as AFTER dispatch — the provider bills that attempt even
+    // though no usage ever arrives. Same guard discipline as recordAttempt.
+    if (attempt) {
+      try {
+        attempt.dispatch = {
+          provider,
+          wireBodyChars: wireBody.length,
+          dispatchedAtMs: Date.now(),
+        };
+      } catch {
+        // telemetry must never break forwarding
+      }
     }
     try {
       response = await fetch(url, {

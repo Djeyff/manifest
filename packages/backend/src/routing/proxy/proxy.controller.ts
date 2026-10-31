@@ -608,7 +608,12 @@ export class ProxyController {
         // carried in the chain's local state, which the abort threw away. The
         // last one is included too: the pending guard makes it a no-op unless
         // recordCancelledRequest failed to write it.
-        await this.recorder.cancelPendingProviderAttempts(startedAttempts);
+        const cancelledAttempts =
+          await this.recorder.cancelPendingProviderAttempts(startedAttempts);
+        // D-2026-10-30-11: abort-burn telemetry — only the attempts this call
+        // ACTUALLY transitioned (a leg that already reached a terminal writer
+        // keeps its real outcome and is excluded upstream: no double count).
+        this.recordAbortBurnTelemetry(req.ingestionContext, cancelledAttempts);
       }
     } finally {
       if (slotAcquired) this.rateLimiter.releaseSlot(tenantId);
@@ -671,6 +676,64 @@ export class ProxyController {
         apiMode,
       })
       .catch((e) => this.logger.warn(`Failed to record Manifest stub: ${e}`));
+  }
+
+  /**
+   * Abort-burn telemetry (D-2026-10-30-11): every client-abort path funnels
+   * here. An attempt that had ALREADY been dispatched upstream is billed by
+   * the provider even though no usage arrives (the Z.AI coding-plan window
+   * counts the attempt) — record the burn per agent + per provider and log
+   * each timing distinctly, so `cancelled` legs stop being an unrecorded
+   * burn floor. Guarded: telemetry can never break the proxy path.
+   */
+  private recordAbortBurnTelemetry(
+    ctx: IngestionContext,
+    cancelledAttempts: ProviderAttemptRef[],
+  ): void {
+    if (!cancelledAttempts.length) {
+      // Aborted before any provider attempt existed (ingress/queue phase), or
+      // every leg had already reached a terminal writer (no burn to record).
+      try {
+        this.quotaAccounting?.recordAbort(ctx.agentName, '', 'before_dispatch', 0);
+      } catch {
+        // ignore accounting failures
+      }
+      this.logger.log(`Client abort before dispatch (no provider call): agent=${ctx.agentName}`);
+      return;
+    }
+    for (const attempt of cancelledAttempts) {
+      const dispatch = attempt.dispatch;
+      if (dispatch?.dispatchedAtMs) {
+        const estTokens = Math.ceil(dispatch.wireBodyChars / 4);
+        try {
+          this.quotaAccounting?.recordAbort(
+            ctx.agentName,
+            dispatch.provider,
+            'after_dispatch',
+            estTokens,
+          );
+        } catch {
+          // ignore accounting failures
+        }
+        this.logger.warn(
+          `Client abort AFTER dispatch (provider billed the attempt): agent=${ctx.agentName} provider=${dispatch.provider} attempt=${attempt.attemptNumber} est_tokens=${estTokens}`,
+        );
+      } else {
+        try {
+          this.quotaAccounting?.recordAbort(
+            ctx.agentName,
+            dispatch?.provider ?? '',
+            'before_dispatch',
+            0,
+          );
+        } catch {
+          // ignore accounting failures
+        }
+        this.logger.log(
+          `Client abort before dispatch (no provider call): agent=${ctx.agentName} attempt=${attempt.attemptNumber}`,
+        );
+      }
+    }
   }
 
   private async handleProxyError(

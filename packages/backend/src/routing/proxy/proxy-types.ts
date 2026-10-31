@@ -73,6 +73,23 @@ export interface ProviderAttemptRef {
   recordingCapture?: AttemptRecordingCapture;
   startRecording?: (recording: ProviderAttemptRecordingStart) => void;
   finishRecording?: (response?: RecordingResponseBody | null) => Promise<void>;
+  /**
+   * Abort-billing capture (D-2026-10-30-11): set the instant this attempt's
+   * exact serialized wire body reaches the upstream fetch — beside the B2
+   * recordAttempt call in provider-client.executeFetch. Attempts that never
+   * reach executeFetch (cooldown skip, credential reject, pre-fetch throw)
+   * keep this unset, so a later client abort classifies as BEFORE dispatch
+   * (no provider burn).
+   */
+  dispatch?: AttemptDispatchInfo;
+}
+
+export interface AttemptDispatchInfo {
+  provider: string;
+  /** Length of the exact serialized wire body sent upstream. */
+  wireBodyChars: number;
+  /** Instant the fetch was issued. */
+  dispatchedAtMs: number;
 }
 
 export type StartProviderAttempt = (attempt: ProviderAttemptStart) => ProviderAttemptRef;
