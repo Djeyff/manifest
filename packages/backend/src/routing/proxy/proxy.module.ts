@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AgentMessage } from '../../entities/agent-message.entity';
 import { CustomProvider } from '../../entities/custom-provider.entity';
 import { ReasoningContentCacheEntry } from '../../entities/reasoning-content-cache-entry.entity';
+import { TenantProvider } from '../../entities/tenant-provider.entity';
 import { RoutingCoreModule } from '../routing-core/routing-core.module';
 import { ModelPricesModule } from '../../model-prices/model-prices.module';
 import { ModelDiscoveryModule } from '../../model-discovery/model-discovery.module';
@@ -14,6 +15,9 @@ import { CustomProviderModule } from '../custom-provider/custom-provider.module'
 import { HeaderTiersModule } from '../header-tiers/header-tiers.module';
 import { BillingModule } from '../../billing/billing.module';
 import { AutofixModule } from '../autofix/autofix.module';
+import { ZaiQuotaController } from '../zai-quota/zai-quota.controller';
+import { ZaiQuotaTextController } from '../zai-quota/zai-quota-text.controller';
+import { ZaiQuotaService } from '../zai-quota/zai-quota.service';
 import { ProxyController } from './proxy.controller';
 import { ProxyService } from './proxy.service';
 import { ProxyFallbackService } from './proxy-fallback.service';
@@ -34,7 +38,12 @@ import { QuotaAccountingController } from './quota-accounting.controller';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([AgentMessage, CustomProvider, ReasoningContentCacheEntry]),
+    TypeOrmModule.forFeature([
+      AgentMessage,
+      CustomProvider,
+      ReasoningContentCacheEntry,
+      TenantProvider,
+    ]),
     RoutingCoreModule,
     ModelPricesModule,
     ModelDiscoveryModule,
@@ -47,7 +56,7 @@ import { QuotaAccountingController } from './quota-accounting.controller';
     BillingModule,
     AutofixModule,
   ],
-  controllers: [ProxyController, QuotaAccountingController],
+  controllers: [ProxyController, QuotaAccountingController, ZaiQuotaController, ZaiQuotaTextController],
   providers: [
     ProxyService,
     ProxyFallbackService,
@@ -64,6 +73,7 @@ import { QuotaAccountingController } from './quota-accounting.controller';
     ProxyExceptionFilter,
     AttemptRecordingService,
     QuotaAccountingService,
+    ZaiQuotaService,
   ],
   exports: [ProviderClient],
 })
