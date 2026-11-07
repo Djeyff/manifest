@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { TenantProvider } from '../../entities/tenant-provider.entity';
@@ -72,7 +72,13 @@ export class ZaiQuotaService implements OnModuleInit, OnModuleDestroy {
   constructor(
     @InjectRepository(TenantProvider)
     private readonly providerRepo: Repository<TenantProvider>,
+    // Test seams: @Optional() so Nest DI injects undefined and the built-in
+    // fetchJson / process.env fallbacks apply in production. Undecorated
+    // optional params made Nest resolve them as providers and crash the whole
+    // module boot (UnknownDependenciesException, RET-595 hotfix 2).
+    @Optional()
     fetchImpl?: FetchJsonImpl,
+    @Optional()
     env: Record<string, string | undefined> = process.env,
   ) {
     this.pollMs = clampPollMs(env['ZAI_QUOTA_POLL_SEC']);
