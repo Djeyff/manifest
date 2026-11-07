@@ -121,6 +121,7 @@ function recordAutofixOriginalIfRetried(
   callerAttribution?: CallerAttribution | null,
   requestHeaders?: Record<string, string> | null,
   requestId?: string,
+  sessionKey?: string | null,
   route?: {
     model?: string;
     provider?: string;
@@ -139,6 +140,7 @@ function recordAutofixOriginalIfRetried(
       reason: meta.reason,
       authType: route?.authType ?? meta.auth_type,
       traceId,
+      sessionKey,
       callerAttribution,
       requestHeaders,
       requestParams: meta.request_params,
@@ -246,6 +248,7 @@ export async function handleProviderError(
   requestId: string = uuid(),
   requestDurationMs?: number,
   apiMode?: ProxyApiMode,
+  sessionKey?: string | null,
 ): Promise<void> {
   recordAutofixOriginalIfRetried(
     ctx,
@@ -256,6 +259,7 @@ export async function handleProviderError(
     callerAttribution,
     requestHeaders,
     requestId,
+    sessionKey,
   );
 
   if (failedFallbacks && failedFallbacks.length > 0 && !meta.fallbackFromModel) {
@@ -275,6 +279,7 @@ export async function handleProviderError(
       requestId,
       requestDurationMs,
       apiMode,
+      sessionKey,
     );
     return;
   }
@@ -290,6 +295,7 @@ export async function handleProviderError(
       provider: meta.provider,
       tier: meta.tier,
       traceId,
+      sessionKey,
       fallbackFromModel: meta.fallbackFromModel,
       fallbackIndex: meta.fallbackIndex,
       authType: meta.auth_type,
@@ -369,6 +375,7 @@ function handleFallbackExhausted(
   requestId: string,
   requestDurationMs?: number,
   apiMode?: ProxyApiMode,
+  sessionKey?: string | null,
 ): void {
   const baseTime = Date.now();
   const primaryAttemptNumber = currentPrimaryAttemptNumber(autofix);
@@ -379,6 +386,7 @@ function handleFallbackExhausted(
       traceId,
       baseTimeMs: baseTime,
       markHandled: true,
+      sessionKey,
       lastAsError: true,
       authType: meta.auth_type,
       providerKeyLabel: meta.provider_key_label,
@@ -425,6 +433,7 @@ function handleFallbackExhausted(
         // the plain original failure carrying only Phoenix's audit.
         autofix,
         apiMode,
+        sessionKey,
       },
     ),
     'primary failure',
@@ -535,6 +544,7 @@ export function recordFallbackFailures(
   requestHeaders?: Record<string, string> | null,
   autofix?: AutofixRecord,
   requestId: string = uuid(),
+  sessionKey?: string | null,
 ): string | undefined {
   if (!meta.fallbackFromModel) return undefined;
 
@@ -555,6 +565,7 @@ export function recordFallbackFailures(
     callerAttribution,
     requestHeaders,
     requestId,
+    sessionKey,
     {
       model: meta.fallbackFromModel,
       provider: meta.primaryProvider,
@@ -575,6 +586,7 @@ export function recordFallbackFailures(
         attemptNumber: primaryAttemptNumber,
         attempt: meta.primaryAttempt,
         skipAttempt: meta.primaryProviderCallStarted === false,
+        sessionKey,
         // Use the primary provider explicitly — meta.provider holds the
         // succeeding fallback's provider in this flow, not the primary's.
         provider: meta.primaryProvider,
@@ -613,6 +625,7 @@ export function recordFallbackFailures(
         firstAttemptNumber: primaryAttemptNumber + 1,
         baseTimeMs: fallbackBaseTime,
         markHandled: true,
+        sessionKey,
         authType: primaryAuthType,
         providerKeyLabel: meta.primaryKeyLabel ?? meta.provider_key_label,
         reason: meta.reason,
@@ -1044,6 +1057,7 @@ export function recordSuccess(
         // `autofix` is the primary's record (request-level status); the winning
         // fallback's own record is passed separately so only it can stamp the
         // fallback-success row.
+        sessionKey,
         autofix,
         fallbackAutofix,
         apiMode,

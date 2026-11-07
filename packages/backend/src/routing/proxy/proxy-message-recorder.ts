@@ -120,6 +120,8 @@ export interface ProviderErrorOpts extends HeaderTierRef {
   provider?: string;
   tier?: string;
   traceId?: string;
+  /** Caller session scope (`x-session-key`); persisted to agent_messages.session_key. */
+  sessionKey?: string | null;
   fallbackFromModel?: string;
   fallbackIndex?: number;
   authType?: string;
@@ -221,6 +223,8 @@ export interface CancelledRequestOpts {
   attemptStart?: ProviderAttemptStart;
   requestDurationMs?: number;
   traceId?: string;
+  /** Caller session scope (`x-session-key`) for the cancelled rows. */
+  sessionKey?: string | null;
   /** API surface to retain when cancellation creates or repairs the Request. */
   apiMode?: ProxyApiMode;
 }
@@ -231,6 +235,8 @@ export interface FallbackSuccessOpts extends HeaderTierRef {
   attempt?: ProviderAttemptRef;
   requestDurationMs?: number;
   traceId?: string;
+  /** Caller session scope (`x-session-key`); persisted to the fallback-success rows. */
+  sessionKey?: string | null;
   provider?: string;
   fallbackFromModel?: string;
   fallbackIndex?: number;
@@ -310,6 +316,8 @@ export interface AutofixOriginalOpts extends HeaderTierRef {
   callerAttribution?: CallerAttribution | null;
   requestHeaders?: Record<string, string> | null;
   requestParams?: RequestParamDefaults | null;
+  /** Caller session scope (`x-session-key`) for the original-failure row. */
+  sessionKey?: string | null;
 }
 
 function buildMessageRow(
@@ -670,7 +678,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       opts.requestId,
       {
         trace_id: opts.traceId ?? null,
-        session_key: opts.sessionKey ?? null,
+        session_key: normalizeSessionKey(opts.sessionKey),
         timestamp: opts.timestamp,
         status: PENDING_STATUS,
         model: opts.requestedModel ?? null,
@@ -723,6 +731,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       duration_ms: opts.requestDurationMs ?? null,
       status: CANCELLED_STATUS,
       trace_id: opts.traceId ?? null,
+      session_key: normalizeSessionKey(opts.sessionKey),
       provider: opts.attemptStart?.provider ?? null,
       model: opts.attemptStart?.model ?? null,
       auth_type: opts.attemptStart?.authType ?? null,
@@ -807,6 +816,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       provider,
       tier,
       traceId,
+      sessionKey,
       fallbackFromModel,
       fallbackIndex,
       authType,
@@ -847,6 +857,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       request_id: requestId,
       ...attemptIdentity(attempt, attemptNumber),
       trace_id: traceId ?? null,
+      session_key: normalizeSessionKey(sessionKey),
       timestamp: new Date().toISOString(),
       duration_ms: requestDurationMs ?? null,
       status: messageStatus,
@@ -921,7 +932,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
     const row = buildMessageRow(ctx, {
       request_id: requestId,
       trace_id: traceId ?? null,
-      session_key: sessionKey ?? null,
+      session_key: normalizeSessionKey(sessionKey),
       timestamp: new Date().toISOString(),
       duration_ms: durationMs ?? null,
       status: httpStatus === 429 ? 'rate_limited' : 'error',
@@ -968,6 +979,8 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
     failures: FailedFallback[],
     opts?: {
       traceId?: string;
+      /** Caller session scope (`x-session-key`) for every failed-fallback hop row. */
+      sessionKey?: string | null;
       requestId?: string;
       firstAttemptNumber?: number;
       baseTimeMs?: number;
@@ -987,6 +1000,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
   ): Promise<void> {
     const {
       traceId,
+      sessionKey,
       requestId = uuid(),
       firstAttemptNumber,
       baseTimeMs,
@@ -1045,6 +1059,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
             firstAttemptNumber == null ? undefined : firstAttemptNumber + i,
           ),
           trace_id: traceId ?? null,
+          session_key: normalizeSessionKey(sessionKey),
           timestamp: ts,
           status,
           error_message: errorMessage,
@@ -1106,6 +1121,8 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       /** The route failed locally before provider transport started. */
       skipAttempt?: boolean;
       requestDurationMs?: number;
+      /** Caller session scope (`x-session-key`) for the failed-primary row. */
+      sessionKey?: string | null;
       reason?: string;
       tenantProviderId?: string | null;
       /** Label of that same connection, so the failed primary names the key it used. */
@@ -1142,6 +1159,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
     const row = buildMessageRow(ctx, {
       request_id: requestId,
       ...attemptIdentity(opts?.attempt, opts?.attemptNumber),
+      session_key: normalizeSessionKey(opts?.sessionKey),
       timestamp,
       duration_ms: opts?.requestDurationMs ?? null,
       status: 'fallback_error',
@@ -1198,6 +1216,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       attempt,
       requestDurationMs,
       traceId,
+      sessionKey,
       provider,
       fallbackFromModel,
       fallbackIndex,
@@ -1251,6 +1270,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       request_id: requestId,
       ...attemptIdentity(attempt, attemptNumber),
       trace_id: traceId ?? null,
+      session_key: normalizeSessionKey(sessionKey),
       timestamp: timestamp ?? new Date().toISOString(),
       duration_ms: requestDurationMs ?? null,
       status: 'ok',
@@ -1412,6 +1432,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       request_id: requestId,
       ...attemptIdentity(opts?.attempt, opts?.attemptNumber),
       trace_id: opts?.traceId ?? null,
+      session_key: normalizeSessionKey(opts?.sessionKey),
       timestamp: new Date(Date.now() - 1000).toISOString(),
       status: 'auto_fixed',
       // The full `{"error":{…}}` envelope, like every other error row — storing the

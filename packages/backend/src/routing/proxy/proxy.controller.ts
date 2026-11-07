@@ -372,6 +372,8 @@ export class ProxyController {
           HttpStatus.PAYMENT_REQUIRED,
           'M204',
           Date.now() - startTime,
+          undefined,
+          sessionKey,
         );
         throw err;
       }
@@ -388,6 +390,9 @@ export class ProxyController {
         apiMode,
         undefined,
         undefined,
+        undefined,
+        undefined,
+        sessionKey,
       );
       return;
     }
@@ -600,6 +605,7 @@ export class ProxyController {
         startTime,
         currentAttempt,
         currentAttemptStart,
+        sessionKey,
       );
       await (currentMeta?.attempt ?? currentAttempt)?.finishRecording?.();
       if (clientAbort.signal.aborted) {
@@ -688,6 +694,7 @@ export class ProxyController {
     startTime?: number,
     currentAttempt?: ProviderAttemptRef,
     currentAttemptStart?: ProviderAttemptStart,
+    sessionKey?: string | null,
   ): Promise<void> {
     const capture = (meta?.attempt ?? currentAttempt)?.recordingCapture;
     if (clientAbort.signal.aborted) {
@@ -698,6 +705,7 @@ export class ProxyController {
           attemptStart: currentAttemptStart,
           requestDurationMs: startTime == null ? undefined : Date.now() - startTime,
           traceId,
+          sessionKey,
           apiMode,
         })
         .catch((e) => this.logger.warn(`Failed to record cancelled Request: ${e}`));
@@ -742,6 +750,7 @@ export class ProxyController {
           err.code,
           startTime == null ? undefined : Date.now() - startTime,
           meta,
+          sessionKey,
         );
       }
     } else if (
@@ -763,6 +772,7 @@ export class ProxyController {
         'M500',
         startTime == null ? undefined : Date.now() - startTime,
         meta,
+        sessionKey,
       );
     } else {
       this.recorder
@@ -790,6 +800,7 @@ export class ProxyController {
               }
             : {}),
           traceId,
+          sessionKey,
           callerAttribution,
           requestHeaders,
           requestDurationMs: startTime == null ? undefined : Date.now() - startTime,
@@ -956,6 +967,7 @@ export class ProxyController {
     errorCode?: ManifestErrorCode,
     durationMs?: number,
     meta?: RoutingMeta,
+    sessionKey?: string | null,
   ): void {
     const body = req.body as Record<string, unknown> | undefined;
     this.recorder
@@ -969,7 +981,7 @@ export class ProxyController {
         reason,
         model: this.extractRequestedModel(body),
         traceId,
-        sessionKey: this.extractSessionKey(req),
+        sessionKey: sessionKey ?? this.extractSessionKey(req),
         callerAttribution,
         requestHeaders,
         durationMs,
