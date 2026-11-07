@@ -18,6 +18,8 @@ import {
 import { createSsePayloadParser } from './sse-parser';
 import {
   classifyProviderError,
+  classifyUpstreamHint,
+  extractUpstreamCode,
   openAiErrorTypeForStatus,
   parseStructuredProviderError,
   sanitizeProviderError,
@@ -205,10 +207,12 @@ export function buildOpenAiCompatibleError(
     model?: string;
     apiMode?: ProxyApiMode;
     extra?: Record<string, unknown>;
+    retryAfterSeconds?: number | null;
   } = {},
 ): Record<string, unknown> {
   const classified = classifyProviderError(status, errorBody);
   const structured = parseStructuredProviderError(status, errorBody);
+  const upstreamHint = classifyUpstreamHint(status, errorBody);
   return {
     message:
       classified?.message ??
@@ -223,9 +227,19 @@ export function buildOpenAiCompatibleError(
           : 'api_error'
         : openAiErrorTypeForStatus(status)),
     param: structured?.param ?? null,
-    code: opts.code !== undefined ? opts.code : (classified?.code ?? structured?.code ?? null),
+    code:
+      opts.code !== undefined
+        ? opts.code
+        : (classified?.code ?? structured?.code ?? extractUpstreamCode(errorBody) ?? null),
     status,
     source: opts.source ?? classified?.source ?? 'provider',
+    // Stable per-code envelope (RET-590 / D-2026-11-07-03 item2): downstream
+    // automation keys on kind/hint/retryable (+ retry_after_seconds parity
+    // with the Retry-After header). Additive only - prior fields unchanged.
+    kind: upstreamHint?.kind ?? null,
+    hint: upstreamHint?.hint ?? null,
+    retryable: upstreamHint ? upstreamHint.retryable : null,
+    ...(opts.retryAfterSeconds != null ? { retry_after_seconds: opts.retryAfterSeconds } : {}),
     ...(opts.provider ? { provider: opts.provider } : {}),
     ...(opts.model ? { model: opts.model } : {}),
     ...(opts.extra ?? {}),
@@ -336,6 +350,7 @@ export async function handleProviderError(
       provider: meta.provider,
       model: meta.model,
       apiMode,
+      retryAfterSeconds: halt?.retryAfterSeconds ?? null,
     }),
   };
   res.json(responseBody);
