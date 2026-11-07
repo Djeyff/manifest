@@ -62,7 +62,10 @@ export class ZaiQuotaTextController {
     const body = ordered
       .map((label) => {
         const row = snapshot.labels[label];
-        const labelCol = displayLabel(label).padEnd(LABEL_COL_WIDTH);
+        const name = displayLabel(label);
+        // Long display names must keep a space before the gauges (e.g.
+        // "KaanAssistV2 5h 87%", never "KaanAssistV25h").
+        const labelCol = name.length < LABEL_COL_WIDTH ? name.padEnd(LABEL_COL_WIDTH) : `${name} `;
         return `${labelCol}5h ${pctCell(row.five_h_pct_left)} | wk ${pctCell(row.weekly_pct_left)}`;
       })
       .join('\n');

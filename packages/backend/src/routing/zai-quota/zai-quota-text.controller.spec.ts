@@ -46,6 +46,7 @@ describe('ZaiQuotaTextController (RET-595 /status/quota.txt)', () => {
     const ctrl = new ZaiQuotaTextController(
       svcWith({
         'CCR Backup': labelRow({ label: 'CCR Backup' }),
+        KaanAssistV2: labelRow({ label: 'KaanAssistV2', five_h_pct_left: 87, weekly_pct_left: 79 }),
         Spare: labelRow({ label: 'Spare', five_h_pct_left: 7.6 }),
         CCR: labelRow({ label: 'CCR', five_h_pct_left: 0, weekly_pct_left: 0 }),
       }),
@@ -53,6 +54,7 @@ describe('ZaiQuotaTextController (RET-595 /status/quota.txt)', () => {
     expect(ctrl.getQuotaText()).toBe(
       'CCR      5h 0% | wk 0%\n' +
         'CCR-BKP  5h -- | wk --\n' +
+        'KaanAssistV2 5h 87% | wk 79%\n' +
         'Spare    5h 8% | wk --\n',
     );
   });
