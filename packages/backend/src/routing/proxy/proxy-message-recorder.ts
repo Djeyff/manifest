@@ -195,6 +195,16 @@ export interface ManifestBlockedRequestOpts {
    * requested model is still recorded in the model field.
    */
   routing?: ManifestBlockedRouting;
+  /**
+   * Route attribution for the reject (RET-599-FU). Door rejects (M201-M204)
+   * never contact a provider, but the tier the caller addressed resolves to a
+   * route — stamping it at write time keeps per-provider/per-connection
+   * accounting complete without post-hoc backfills. Stays NULL when nothing
+   * resolved (M101 with no providers configured, M302 with no model match).
+   */
+  provider?: string | null;
+  providerKeyLabel?: string | null;
+  tenantProviderId?: string | null;
 }
 
 export interface ManifestBlockedRouting {
@@ -894,12 +904,14 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
    * (M100/M101), limits (M200/M204), rate limits (M201–M203), malformed requests
    * (M300), internal errors (M500), and expired keys (M004).
    *
-   * `provider` and `routing_tier` are deliberately left NULL — no provider was
-   * contacted and no tier was chosen. (The old canned-stub path wrote a
-   * placeholder `provider='manifest'` / `routing_tier='simple'`, which put a
-   * meaningless SIMPLE badge on setup errors and a phantom "manifest" entry in
-   * the Messages provider dropdown.) `model` keeps the model the caller asked
-   * for, which is real information.
+   * `routing_tier` is left NULL unless the reject carries routing context, and
+   * `provider`/`provider_key_label`/`tenant_provider_id` are stamped only from
+   * a resolved route (RET-599-FU): door rejects (M201-M204) attribute the tier
+   * route the caller addressed, post-routing rejects attribute the route that
+   * actually served. Never a placeholder `provider='manifest'` — that used to
+   * put a meaningless SIMPLE badge on setup errors and a phantom "manifest"
+   * entry in the Messages provider dropdown. `model` keeps the model the caller
+   * asked for, which is real information.
    */
   async recordManifestBlockedRequest(
     ctx: IngestionContext,
@@ -921,6 +933,9 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       attempt,
       apiMode,
       routing,
+      provider,
+      providerKeyLabel,
+      tenantProviderId,
     } = opts;
 
     const canonical = await this.customProviders.canonicalizeAgentMessageKeys(
@@ -941,15 +956,15 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       error_code: errorCode ?? null,
       error_http_status: httpStatus ?? null,
       model: canonical.model,
-      provider: null,
+      provider: provider ?? null,
       routing_tier: routing?.tier ?? null,
       routing_reason: reason,
       fallback_from_model: null,
       fallback_index: null,
       auth_type: null,
       specificity_category: routing?.specificityCategory ?? null,
-      provider_key_label: null,
-      tenant_provider_id: null,
+      provider_key_label: providerKeyLabel ?? null,
+      tenant_provider_id: tenantProviderId ?? null,
       caller_attribution: callerAttribution ?? null,
       request_headers: requestHeaders ?? null,
       request_params: null,

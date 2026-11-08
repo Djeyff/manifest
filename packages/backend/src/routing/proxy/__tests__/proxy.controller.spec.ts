@@ -1564,7 +1564,9 @@ describe('ProxyController', () => {
       expect(mockMessageRepo.insert).toHaveBeenCalledWith(
         expect.objectContaining({
           error_code: 'M500',
-          provider: null,
+          provider: 'openai',
+          provider_key_label: null,
+          tenant_provider_id: null,
           routing_tier: 'standard',
           specificity_category: 'coding',
           header_tier_id: 'header-tier-1',

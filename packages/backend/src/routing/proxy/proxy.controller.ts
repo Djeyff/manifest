@@ -19,7 +19,7 @@ import { currentMinimaxModelChoices } from 'manifest-shared';
 import { Public } from '../../common/decorators/public.decorator';
 import { AgentKeyAuthGuard } from '../../otlp/guards/agent-key-auth.guard';
 import { IngestionContext } from '../../otlp/interfaces/ingestion-context.interface';
-import { ProxyService, type RoutingMeta } from './proxy.service';
+import { ProxyService, type RejectRouteAttribution, type RoutingMeta } from './proxy.service';
 import { ProxyRateLimiter } from './proxy-rate-limiter';
 import { ProviderClient } from './provider-client';
 import { ProxyMessageRecorder, type ManifestBlockedRequestReason } from './proxy-message-recorder';
@@ -76,6 +76,12 @@ import {
 } from './attempt-recording-capture';
 
 const MAX_SEEN_TENANTS = 10_000;
+/**
+ * Manifest codes thrown by the door (per-user/per-IP rate limit, concurrency,
+ * plan limit) BEFORE routing runs. Their rejects carry no routing meta, so the
+ * writer resolves the addressed tier route for attribution (RET-599-FU).
+ */
+const DOOR_REJECT_ERROR_CODES: ReadonlySet<string> = new Set(['M201', 'M202', 'M203', 'M204']);
 const SEEN_TENANT_TTL_MS = 24 * 60 * 60 * 1000;
 const MODEL_CREATED_UNKNOWN = 0;
 
@@ -675,6 +681,16 @@ export class ProxyController {
         attempt: meta.attempt,
         durationMs,
         apiMode,
+        // Post-routing stub: meta carries the route that actually served or was
+        // about to serve (RET-599-FU) — stamp it so stub rows attribute like
+        // their sibling failure/success rows.
+        ...(meta.provider && meta.provider !== 'manifest'
+          ? {
+              provider: meta.provider,
+              providerKeyLabel: meta.provider_key_label,
+              tenantProviderId: meta.tenantProviderId,
+            }
+          : {}),
       })
       .catch((e) => this.logger.warn(`Failed to record Manifest stub: ${e}`));
   }
@@ -970,37 +986,67 @@ export class ProxyController {
     sessionKey?: string | null,
   ): void {
     const body = req.body as Record<string, unknown> | undefined;
-    this.recorder
-      .recordManifestBlockedRequest(req.ingestionContext, {
-        requestId,
-        httpStatus: httpStatus ?? (err instanceof HttpException ? err.getStatus() : 500),
-        // The raw internal message, not the friendly M500 text the caller saw —
-        // the dashboard row is where you go to find out what actually broke.
-        errorMessage: this.extractErrorMessage(err),
-        errorCode,
-        reason,
-        model: this.extractRequestedModel(body),
-        traceId,
-        sessionKey: sessionKey ?? this.extractSessionKey(req),
-        callerAttribution,
-        requestHeaders,
-        durationMs,
-        apiMode,
-        // A friendly stub's meta is a placeholder (provider 'manifest', tier
-        // 'simple'), not a routing decision, so only a real route stamps tiers.
-        ...(meta && meta.provider !== 'manifest'
-          ? {
-              routing: {
-                tier: meta.tier,
-                specificityCategory: meta.specificity_category,
-                headerTierId: meta.header_tier_id,
-                headerTierName: meta.header_tier_name,
-                headerTierColor: meta.header_tier_color,
-              },
-            }
-          : {}),
-      })
-      .catch((e) => this.logger.warn(`Failed to record Manifest-blocked request: ${e}`));
+    // Route attribution at write time (RET-599-FU). Manifest-authored rejects
+    // used to land with NULL provider/key/tenant_provider_id — the accounting
+    // blind spot RET-599 had to backfill. Stamp what the reject was addressed
+    // to instead: post-routing meta carries the real route; door rejects
+    // (M201-M204, thrown before routing ran) resolve the caller's header-tier
+    // route, else the agent's default tier. Genuinely unresolvable rejects
+    // (M101 no providers, M302 no model match) keep NULL.
+    const routeAttribution: Promise<RejectRouteAttribution | null | undefined> =
+      meta && meta.provider && meta.provider !== 'manifest'
+        ? Promise.resolve({
+            provider: meta.provider,
+            providerKeyLabel: meta.provider_key_label ?? null,
+            tenantProviderId: meta.tenantProviderId ?? null,
+          })
+        : errorCode && DOOR_REJECT_ERROR_CODES.has(errorCode)
+          ? // Async IIFE: resolution must never throw synchronously — a missing
+            // or broken resolver degrades the row to NULL attribution instead of
+            // replacing the caller's reject with a TypeError (RET-599-FU).
+            (async () =>
+              this.proxyService.resolveRejectRouteAttribution(
+                req.ingestionContext.agentId,
+                req.ingestionContext.tenantId,
+                req.headers,
+              ))().catch(() => undefined)
+          : Promise.resolve(undefined);
+    routeAttribution
+      .then((attribution) =>
+        this.recorder
+          .recordManifestBlockedRequest(req.ingestionContext, {
+            requestId,
+            httpStatus: httpStatus ?? (err instanceof HttpException ? err.getStatus() : 500),
+            // The raw internal message, not the friendly M500 text the caller saw —
+            // the dashboard row is where you go to find out what actually broke.
+            errorMessage: this.extractErrorMessage(err),
+            errorCode,
+            reason,
+            model: this.extractRequestedModel(body),
+            traceId,
+            sessionKey: sessionKey ?? this.extractSessionKey(req),
+            callerAttribution,
+            requestHeaders,
+            durationMs,
+            apiMode,
+            ...(attribution ?? {}),
+            // A friendly stub's meta is a placeholder (provider 'manifest', tier
+            // 'simple'), not a routing decision, so only a real route stamps tiers.
+            ...(meta && meta.provider !== 'manifest'
+              ? {
+                  routing: {
+                    tier: meta.tier,
+                    specificityCategory: meta.specificity_category,
+                    headerTierId: meta.header_tier_id,
+                    headerTierName: meta.header_tier_name,
+                    headerTierColor: meta.header_tier_color,
+                  },
+                }
+              : {}),
+          })
+          .catch((e) => this.logger.warn(`Failed to record Manifest-blocked request: ${e}`)),
+      )
+      .catch((e) => this.logger.warn(`Failed to attribute Manifest-blocked request: ${e}`));
   }
 
   private trackFirstProxyRequest(tenantId: string): void {

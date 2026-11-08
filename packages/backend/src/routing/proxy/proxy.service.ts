@@ -21,6 +21,7 @@ import type {
   OutputModality,
   SpecificityCategory,
   TierSlot,
+  ModelRoute,
 } from 'manifest-shared';
 import {
   DEFAULT_RESPONSE_MODE,
@@ -227,6 +228,19 @@ function warmupFailureForward(forward: ForwardResult, message: string): ForwardR
       { status: 502, headers: { 'content-type': 'application/json' } },
     ),
   };
+}
+
+/**
+ * Route attribution stamped onto Manifest-authored reject rows (RET-599-FU):
+ * what the request was addressed to when Manifest itself rejected it, so
+ * reject-path spend stays attributable without post-hoc backfills.
+ */
+export interface RejectRouteAttribution {
+  provider: string;
+  /** The connection label the route pins, else the selected default key's. */
+  providerKeyLabel?: string | null;
+  /** The tenant_providers row that would have served the request. */
+  tenantProviderId: string | null;
 }
 
 @Injectable()
@@ -1154,6 +1168,72 @@ export class ProxyService {
         xaiOauth: this.xaiOauth,
       },
     };
+  }
+
+  /**
+   * Best-effort route attribution for a Manifest-authored reject row
+   * (RET-599-FU). Door rejects (rate/concurrency/plan limit) are thrown before
+   * routing runs, so their agent_messages rows used to carry NULL
+   * provider/provider_key_label/tenant_provider_id — the accounting blind spot
+   * RET-599 had to backfill. This resolves what the request was addressed to:
+   * the caller's header-tier route when one matches, else the agent's default
+   * tier route, with the connection id from the same credential selection the
+   * proxy itself uses. Never throws and never contacts a provider; returns
+   * null when nothing resolvable exists (no route configured).
+   */
+  async resolveRejectRouteAttribution(
+    agentId: string,
+    tenantId: string,
+    headers?: ProxyRequestOptions['headers'],
+  ): Promise<RejectRouteAttribution | null> {
+    let route: ModelRoute | null = null;
+    if (headers) {
+      try {
+        const headerTier = await this.resolveService.resolveHeaderTier(agentId, tenantId, headers);
+        route = headerTier?.route ?? null;
+      } catch {
+        route = null;
+      }
+    }
+    if (!route) {
+      try {
+        const fallback = await this.resolveService.resolveForTier(
+          agentId,
+          tenantId,
+          'default',
+          'default',
+        );
+        route = fallback.route ?? null;
+      } catch {
+        return null;
+      }
+    }
+    if (!route?.provider) return null;
+    try {
+      const credentials = await this.resolveCredentials(agentId, tenantId, {
+        provider: route.provider,
+        auth_type: route.authType,
+        provider_key_label: route.keyLabel ?? undefined,
+      });
+      if (credentials.ok) {
+        return {
+          provider: route.provider,
+          providerKeyLabel: credentials.keyLabel ?? route.keyLabel ?? null,
+          tenantProviderId: credentials.tenantProviderId,
+        };
+      }
+      return {
+        provider: route.provider,
+        providerKeyLabel: route.keyLabel ?? null,
+        tenantProviderId: credentials.tenantProviderId ?? null,
+      };
+    } catch {
+      return {
+        provider: route.provider,
+        providerKeyLabel: route.keyLabel ?? null,
+        tenantProviderId: null,
+      };
+    }
   }
 
   private resolveCredentials(
