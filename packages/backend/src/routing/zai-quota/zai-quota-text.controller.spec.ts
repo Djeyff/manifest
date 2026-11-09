@@ -64,3 +64,63 @@ describe('ZaiQuotaTextController (RET-595 /status/quota.txt)', () => {
     expect(ctrl.getQuotaText()).toBe('');
   });
 });
+
+describe('ZaiQuotaTextController (RET-617 /status/quota-resets.txt)', () => {
+  it('renders identical row prefixes plus the weekly reset in UTC MM-DD HH:MMZ, same row order', () => {
+    const ctrl = new ZaiQuotaTextController(
+      svcWith({
+        RCR: labelRow({
+          label: 'RCR',
+          five_h_pct_left: 12.4,
+          weekly_pct_left: 84,
+          five_h_reset_at: '2026-11-09T17:30:45.432Z',
+          weekly_reset_at: '2026-11-13T23:13:10.997Z',
+        }),
+        // Contract-order label present but reset unknown -> still ordered before non-contract labels.
+        'RCR Backup': labelRow({
+          label: 'RCR Backup',
+          five_h_pct_left: 100,
+          weekly_pct_left: 0,
+          weekly_reset_at: '2026-11-10T22:44:13.997Z',
+        }),
+        KaanAssistV2: labelRow({
+          label: 'KaanAssistV2',
+          five_h_pct_left: 87,
+          weekly_pct_left: 79,
+          weekly_reset_at: '2026-12-01T05:07:00Z',
+        }),
+      }),
+    );
+    expect(ctrl.getQuotaResetsText()).toBe(
+      'RCR      5h 12% | wk 84% | ↻ 11-13 23:13Z\n' +
+        'RCR-BKP  5h 100% | wk 0% | ↻ 11-10 22:44Z\n' +
+        'KaanAssistV2 5h 87% | wk 79% | ↻ 12-01 05:07Z\n',
+    );
+  });
+
+  it('renders ↻ -- for null or invalid resets, with each line byte-identical to quota.txt plus the suffix', () => {
+    const ctrl = new ZaiQuotaTextController(
+      svcWith({
+        RCR: labelRow({ label: 'RCR', five_h_pct_left: 95, weekly_pct_left: 34 }),
+        Spare: labelRow({ label: 'Spare', five_h_pct_left: 7.6, weekly_reset_at: 'not-a-date' }),
+      }),
+    );
+    const plain = ctrl.getQuotaText();
+    const resets = ctrl.getQuotaResetsText();
+    expect(resets).toBe('RCR      5h 95% | wk 34% | ↻ --\n' + 'Spare    5h 8% | wk -- | ↻ --\n');
+    const plainLines = plain.split('\n').filter(Boolean);
+    const resetLines = resets.split('\n').filter(Boolean);
+    expect(resetLines).toHaveLength(plainLines.length);
+    resetLines.forEach((line, i) => {
+      expect(line.startsWith(plainLines[i])).toBe(true);
+      expect(line.slice(plainLines[i].length)).toMatch(/^ \| ↻ (?:--|\d{2}-\d{2} \d{2}:\d{2}Z)$/);
+    });
+    // quota.txt itself must never gain the reset field (additive-only contract).
+    expect(plain).not.toContain('↻');
+  });
+
+  it('renders an empty body when no poller is wired (never 500s the widget)', () => {
+    const ctrl = new ZaiQuotaTextController(undefined);
+    expect(ctrl.getQuotaResetsText()).toBe('');
+  });
+});
