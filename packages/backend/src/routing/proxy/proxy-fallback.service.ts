@@ -53,6 +53,14 @@ interface ForwardProviderOptions {
   paramMergeContext?: ParamMergeContext;
   tenantProviderId?: string | null;
   startProviderAttempt?: StartProviderAttempt;
+  /**
+   * RET-647 scope 2b (D-2026-11-10-13): the tier's fallback hops that remain
+   * AFTER this one. When present and non-empty, a transient 429 never arms
+   * the shared-route cooldown — the chain serves the same request, so a route
+   * corpse would only pause the client ("no reason to cooldown if a fallback
+   * has credit"). Quota-class bodies keep their key-scoped handling above.
+   */
+  chainFallbacks?: ModelRoute[];
 }
 
 import { ProviderKeyService } from '../routing-core/provider-key.service';
@@ -710,6 +718,7 @@ export class ProxyFallbackService {
       | 'providerKeyLabel'
       | 'startProviderAttempt'
       | 'signal'
+      | 'chainFallbacks'
     > & { stream?: boolean },
   ): Promise<ForwardResult> {
     if (!forward.retryWireBody) {
@@ -728,18 +737,26 @@ export class ProxyFallbackService {
       if (attempt) attempt.completedAtMs = Date.now();
       // A healed retry can itself be rate-limited. Record the cooldown so the
       // next attempt on this route skips it, exactly as tryForwardToProvider
-      // does for a first attempt.
-      await this.recordRateLimitCooldownForKey(
-        this.rateLimitCooldownKey({
-          agentId: opts.agentId,
-          authType: opts.authType,
-          provider: opts.provider,
-          providerKeyLabel: opts.providerKeyLabel,
-          model: opts.model,
-        }),
-        retried.response,
-        opts.provider,
-      );
+      // does for a first attempt — unless the tier has funded fallback hops,
+      // in which case scope 2b keeps the route corpse un-armed (same rule as
+      // recordRateLimitCooldown).
+      if (!opts.chainFallbacks?.length) {
+        await this.recordRateLimitCooldownForKey(
+          this.rateLimitCooldownKey({
+            agentId: opts.agentId,
+            authType: opts.authType,
+            provider: opts.provider,
+            providerKeyLabel: opts.providerKeyLabel,
+            model: opts.model,
+          }),
+          retried.response,
+          opts.provider,
+        );
+      } else {
+        this.logger.debug(
+          `Transient 429 on healed retry ${opts.provider}/${opts.model}: route cooldown suppressed — funded fallback available`,
+        );
+      }
       return await this.bufferNonStreamBody(
         { ...retried, attempt, providerCallStarted: true },
         opts,
@@ -907,6 +924,17 @@ export class ProxyFallbackService {
           // ignore accounting failures
         }
       }
+      return;
+    }
+    // RET-647 scope 2b (D-2026-11-10-13): a tier with a funded fallback never
+    // arms the shared-route cooldown — the chain serves the same request, so a
+    // route corpse would only pause the client. Tiers WITHOUT a chain keep
+    // today's behavior (arm and let the next attempt skip).
+    if (opts.chainFallbacks?.length) {
+      this.logger.debug(
+        `Transient 429 on ${opts.provider}/${opts.model}: route cooldown suppressed — ` +
+          `${opts.chainFallbacks.length} funded fallback hop(s) available`,
+      );
       return;
     }
     await this.recordRateLimitCooldownForKey(

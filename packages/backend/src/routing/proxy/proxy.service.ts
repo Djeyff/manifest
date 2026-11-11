@@ -481,6 +481,9 @@ export class ProxyService {
       paramMergeContext,
       tenantProviderId: credentials.tenantProviderId,
       startProviderAttempt,
+      // RET-647 scope 2b: the remaining chain hops — their presence suppresses
+      // the transient route cooldown (no client-visible pause when funded).
+      chainFallbacks: this.effectiveFallbackRoutes(resolved),
     });
     const autofixOriginalAttempt = forward.attempt;
     const autofixOriginalProviderCallStarted = forward.providerCallStarted;
@@ -873,6 +876,7 @@ export class ProxyService {
       paramMergeContext: explicitModelOverride ? undefined : { agentId: ctx.agentId, scopeKey },
       tenantProviderId: credentials.tenantProviderId,
       startProviderAttempt: ctx.startProviderAttempt,
+      chainFallbacks: this.effectiveFallbackRoutes(resolved),
     });
   }
 
