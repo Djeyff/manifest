@@ -314,6 +314,22 @@ function applyAnthropicThinkingForOpenAi(
   }
 }
 
+// MiniMax M3.x runs adaptive thinking only. The upstream rejects
+// `reasoning_effort: none` with error 2013 ("requires adaptive thinking;
+// reasoning effort none is not allowed"), so a leg that arrives with the
+// tier `none` must never forward it. `none` is rewritten to `low`, the
+// minimum tier MiniMax accepts, so the leg stays legal while the provider
+// keeps its adaptive thinking on. Every other tier (low/medium/high)
+// is legal and passes through unchanged.
+//
+// This applies to EVERY MiniMax leg, primary or fallback: the effort travels
+// in the shared client body, so a zai/GLM primary that carries `none` would
+// otherwise poison the MiniMax fallback leg.
+function minimaxReasoningEffort(effort: unknown): string | undefined {
+  if (typeof effort !== 'string' || effort.length === 0) return undefined;
+  return effort === 'none' ? 'low' : effort;
+}
+
 function openRouterCacheMode(model: string): 'anthropic' | 'message' | null {
   const normalized = model.toLowerCase().replace(/^~/, '');
   if (normalized.startsWith('anthropic/')) return 'anthropic';
@@ -779,12 +795,35 @@ export class ProviderClient {
             });
       // MiniMax's Messages API takes effort as `output_config.effort`. Matched by
       // provider, not endpoint key, so the CN override (`custom`) is covered.
-      if (isMinimax && requestSource.reasoning_effort !== undefined) {
-        const outputConfig = (requestBody.output_config ?? {}) as Record<string, unknown>;
-        requestBody.output_config = {
-          effort: requestSource.reasoning_effort,
-          ...outputConfig,
-        };
+      //
+      // MiniMax M3.x runs adaptive thinking only: `none` is rejected upstream
+      // with 2013 ("requires adaptive thinking; reasoning effort none is not
+      // allowed"). Strip `none` so the provider applies its adaptive-thinking
+      // default; low/medium/high are legal and pass through unchanged.
+      const nativeOutputConfig = (requestBody.output_config ?? {}) as Record<string, unknown>;
+      if (
+        isMinimax &&
+        (requestSource.reasoning_effort !== undefined || nativeOutputConfig.effort !== undefined)
+      ) {
+        const outputConfig = { ...nativeOutputConfig };
+        // A native `output_config.effort` is the caller's explicit tier and
+        // wins over the shared body tier; both must be legal for MiniMax.
+        const requested =
+          typeof outputConfig.effort === 'string'
+            ? outputConfig.effort
+            : requestSource.reasoning_effort;
+        const effort = minimaxReasoningEffort(requested);
+        if (effort !== undefined) {
+          outputConfig.effort = effort;
+          requestBody.output_config = outputConfig;
+        } else {
+          delete outputConfig.effort;
+          if (Object.keys(outputConfig).length > 0) {
+            requestBody.output_config = outputConfig;
+          } else {
+            delete requestBody.output_config;
+          }
+        }
         delete requestBody.reasoning_effort;
       }
       requestBody.model = bareModel;
@@ -913,6 +952,15 @@ export class ProviderClient {
       forwardReasoningEffort: isBedrockRuntimeGpt,
       keepReasoningEffort: isMinimax,
     });
+    // MiniMax M3.x is adaptive-thinking only: `reasoning_effort: none` is
+    // rejected upstream with 2013. Strip it on the OpenAI-compatible leg too
+    // (the CN `custom` override), so a primary or fallback MiniMax leg never
+    // carries an illegal tier.
+    if (isMinimax && sanitized.reasoning_effort !== undefined) {
+      const effort = minimaxReasoningEffort(sanitized.reasoning_effort);
+      if (effort === undefined) delete sanitized.reasoning_effort;
+      else sanitized.reasoning_effort = effort;
+    }
     if (stream && endpoint.streamUsageReporting === 'openai_stream_options') {
       const existing =
         typeof sanitized.stream_options === 'object' && sanitized.stream_options !== null
