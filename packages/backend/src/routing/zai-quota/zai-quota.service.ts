@@ -12,6 +12,12 @@ import {
   emptyLabelSnapshot,
   parseZaiQuotaLimitPayload,
 } from './zai-quota-monitor';
+import {
+  MINIMAX_QUOTA_BASE_DEFAULT,
+  MINIMAX_QUOTA_PATH,
+  parseMinimaxSubscriptionBlob,
+  parseMinimaxTokenPlanRemainsPayload,
+} from './minimax-quota-monitor';
 
 /** Poll cadence: every 60s unless ZAI_QUOTA_POLL_SEC says otherwise. */
 const DEFAULT_POLL_SEC = 60;
@@ -23,6 +29,9 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 const MONITOR_429_COOLDOWN_MS = 300_000;
 /** First poll waits a beat after boot so the app finishes warming up first. */
 const BOOT_DELAY_MS = 5_000;
+
+/** tenant_providers.provider value of MiniMax M Plan subscription connections. */
+const MINIMAX_PROVIDER_ID = 'minimax';
 
 type FetchJsonImpl = (
   url: string,
@@ -44,7 +53,11 @@ function clampTimeoutMs(envValue: string | undefined): number {
 }
 
 /**
- * Live Z.AI coding-plan quota poller (RET-595).
+ * Live Z.AI coding-plan quota poller (RET-595), extended additively in
+ * RET-598-FU7-GW to also poll MiniMax M Plan subscription connections
+ * (`provider = minimax`, labels like `RCR MM` / `CCR MM`) into the SAME
+ * per-label snapshot — the zai filter, monitor URL, cadence and error
+ * semantics are untouched, so existing rows stay byte-compatible.
  *
  * Every cycle it reads the active `zai` subscription connections (the only
  * place the plan keys exist — encrypted at rest), asks the Z.AI monitor
@@ -62,6 +75,7 @@ export class ZaiQuotaService implements OnModuleInit, OnModuleDestroy {
   private readonly pollMs: number;
   private readonly timeoutMs: number;
   private readonly monitorBase: string;
+  private readonly minimaxBase: string;
   private readonly cooldownUntil = new Map<string, number>();
   private readonly fetchImpl?: FetchJsonImpl;
   private timer?: ReturnType<typeof setTimeout>;
@@ -85,6 +99,8 @@ export class ZaiQuotaService implements OnModuleInit, OnModuleDestroy {
     this.timeoutMs = clampTimeoutMs(env['ZAI_QUOTA_TIMEOUT_MS']);
     const configuredBase = (env['ZAI_QUOTA_MONITOR_BASE'] ?? '').replace(/\/+$/, '');
     this.monitorBase = configuredBase !== '' ? configuredBase : ZAI_MONITOR_BASE_DEFAULT;
+    const configuredMinimaxBase = (env['MINIMAX_QUOTA_MONITOR_BASE'] ?? '').replace(/\/+$/, '');
+    this.minimaxBase = configuredMinimaxBase !== '' ? configuredMinimaxBase : MINIMAX_QUOTA_BASE_DEFAULT;
     this.fetchImpl = fetchImpl;
   }
 
@@ -163,11 +179,30 @@ export class ZaiQuotaService implements OnModuleInit, OnModuleDestroy {
   ): Promise<ZaiQuotaLabelSnapshot> {
     const snapshot = emptyLabelSnapshot(connection.label);
     let bearerKey: string;
+    let url: string;
     try {
-      bearerKey = decryptWithAny(
+      const plaintext = decryptWithAny(
         connection.apiKeyEncrypted,
         getDecryptionSecrets(),
       ).plaintext;
+      if (connection.kind === 'minimax') {
+        // MiniMax subscriptions store an OAuth blob `{t, r, e, u}`; the quota
+        // endpoint wants the access token and answers at the blob's resource
+        // origin (global region). A blob that no longer parses is a per-label
+        // error, never a cycle failure and never a key leak.
+        const blob = parseMinimaxSubscriptionBlob(plaintext);
+        if (!blob) {
+          snapshot.error = 'key_blob_invalid';
+          carryForward(previous, snapshot);
+          this.state.poll_errors += 1;
+          return snapshot;
+        }
+        bearerKey = blob.accessToken;
+        url = `${blob.resourceOrigin ?? this.minimaxBase}${MINIMAX_QUOTA_PATH}`;
+      } else {
+        bearerKey = plaintext;
+        url = this.monitorUrl();
+      }
     } catch {
       snapshot.error = 'key_decrypt_failed';
       carryForward(previous, snapshot);
@@ -177,8 +212,8 @@ export class ZaiQuotaService implements OnModuleInit, OnModuleDestroy {
     let response: { status: number; body: unknown };
     try {
       response = await (this.fetchImpl
-        ? this.fetchImpl(this.monitorUrl(), bearerKey, this.timeoutMs)
-        : this.fetchJson(this.monitorUrl(), bearerKey, this.timeoutMs));
+        ? this.fetchImpl(url, bearerKey, this.timeoutMs)
+        : this.fetchJson(url, bearerKey, this.timeoutMs));
     } catch (error) {
       snapshot.error = error instanceof Error && error.name === 'TimeoutError' ? 'timeout' : 'network_error';
       carryForward(previous, snapshot);
@@ -205,6 +240,30 @@ export class ZaiQuotaService implements OnModuleInit, OnModuleDestroy {
       this.state.poll_errors += 1;
       return snapshot;
     }
+    if (connection.kind === 'minimax') {
+      // RET-598-FU7-GW: MiniMax M Plan rows ride the same feed shape — the
+      // documented `/v1/token_plan/remains` payload maps its 5-hour interval
+      // (`current_interval_remaining_percent` + `end_time`) and weekly window
+      // (`current_weekly_remaining_percent` + `weekly_end_time`) straight onto
+      // the zai gauges. A non-zero `base_resp.status_code` (e.g. 2049 invalid
+      // api key) is a per-label error, never a cycle failure.
+      const parsed = parseMinimaxTokenPlanRemainsPayload(response.body);
+      if (parsed.plan_status_code !== null && parsed.plan_status_code !== 0) {
+        snapshot.error = `minimax_status_${parsed.plan_status_code}`;
+        carryForward(previous, snapshot);
+        this.state.poll_errors += 1;
+        return snapshot;
+      }
+      snapshot.five_h_pct_left = parsed.five_h_pct_left;
+      snapshot.weekly_pct_left = parsed.weekly_pct_left;
+      snapshot.five_h_reset_at = parsed.five_h_reset_at;
+      snapshot.weekly_reset_at = parsed.weekly_reset_at;
+      snapshot.plan_level = parsed.plan_level;
+      snapshot.subscription_status = parsed.subscription_status;
+      snapshot.seen_at = nowIso;
+      snapshot.error = null;
+      return snapshot;
+    }
     const parsed = parseZaiQuotaLimitPayload(response.body);
     snapshot.five_h_pct_left = parsed.five_h_pct_left;
     snapshot.weekly_pct_left = parsed.weekly_pct_left;
@@ -224,20 +283,33 @@ export class ZaiQuotaService implements OnModuleInit, OnModuleDestroy {
   private async loadConnections(): Promise<{ rows: ZaiSubscriptionConnection[]; failed: boolean }> {
     try {
       const found = await this.providerRepo.find({ where: { is_active: true } });
-      const connections = found
+      const subscriptionKeyPresent = (row: (typeof found)[number]): boolean =>
+        row.is_active === true &&
+        row.auth_type === 'subscription' &&
+        typeof row.api_key_encrypted === 'string' &&
+        row.api_key_encrypted.length > 0;
+      const zai = found
+        .filter((row) => subscriptionKeyPresent(row) && isZaiProviderId(String(row.provider)))
+        .map((row) => ({
+          label: (row.label ?? '').trim(),
+          apiKeyEncrypted: row.api_key_encrypted as string,
+          kind: 'zai' as const,
+        }));
+      // RET-598-FU7-GW: MiniMax M Plan keys (labels like `RCR MM` / `CCR MM`)
+      // ride the SAME snapshot and feed contract — additive rows only, the
+      // zai filter above is untouched so existing labels stay byte-compatible.
+      const minimax = found
         .filter(
-          (row) =>
-            row.is_active === true &&
-            isZaiProviderId(String(row.provider)) &&
-            row.auth_type === 'subscription' &&
-            typeof row.api_key_encrypted === 'string' &&
-            row.api_key_encrypted.length > 0,
+          (row) => subscriptionKeyPresent(row) && String(row.provider) === MINIMAX_PROVIDER_ID,
         )
         .map((row) => ({
           label: (row.label ?? '').trim(),
           apiKeyEncrypted: row.api_key_encrypted as string,
-        }))
-        .sort((a, b) => a.label.localeCompare(b.label));
+          kind: 'minimax' as const,
+        }));
+      const connections = [...zai, ...minimax]
+        .filter((connection) => connection.label !== '')
+        .sort((a, b) => a.label.localeCompare(b.label) || a.kind.localeCompare(b.kind));
       this.repoWarned = false;
       return { rows: connections, failed: false };
     } catch (error) {
@@ -294,9 +366,12 @@ export class ZaiQuotaService implements OnModuleInit, OnModuleDestroy {
 }
 
 /** Minimal connection view the poller needs (keeps specs honest and small). */
+type QuotaConnectionKind = 'zai' | 'minimax';
+
 interface ZaiSubscriptionConnection {
   label: string;
   apiKeyEncrypted: string;
+  kind: QuotaConnectionKind;
 }
 
 /**
