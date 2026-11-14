@@ -251,6 +251,8 @@ interface ReasoningStreamState {
   sawToolCall: boolean;
   /** Responses `output_index` → Chat Completions tool call index, in first-seen order. */
   toolCallIndex?: Map<number, number>;
+  /** Output indexes whose arguments arrived as deltas. */
+  argsStreamed?: Set<number>;
 }
 
 /**
@@ -369,8 +371,25 @@ export function fromResponsesResponse(
       cache_read_tokens: inputDetails?.cached_tokens ?? 0,
       cache_creation_tokens:
         inputDetails?.cache_write_tokens ?? inputDetails?.cache_creation_input_tokens ?? 0,
+      ...reasoningTokensDetails(usage),
     },
   };
+}
+
+/**
+ * Responses API reports reasoning tokens under `output_tokens_details`
+ * (already included in `output_tokens`). Surface them the way Chat Completions
+ * does, as `completion_tokens_details.reasoning_tokens`, so clients keep seeing
+ * them. Omitted when the upstream does not report the figure.
+ */
+function reasoningTokensDetails(usage: Record<string, unknown> | undefined): {
+  completion_tokens_details?: { reasoning_tokens: number };
+} {
+  const outputDetails = usage?.output_tokens_details as Record<string, unknown> | undefined;
+  const reasoning = outputDetails?.reasoning_tokens;
+  return typeof reasoning === 'number'
+    ? { completion_tokens_details: { reasoning_tokens: reasoning } }
+    : {};
 }
 
 /* ── Streaming SSE conversion ── */
@@ -434,17 +453,36 @@ export function transformResponsesStreamChunk(
     const data = safeParse(dataStr);
     if (!data) return null;
     const delta = typeof data.delta === 'string' ? data.delta : '';
+    const outputIndex = typeof data.output_index === 'number' ? data.output_index : 0;
+    if (state && delta) (state.argsStreamed ??= new Set()).add(outputIndex);
     return formatSSE(
       {
         delta: {
           tool_calls: [
             {
-              index: denseIndex(
-                state,
-                typeof data.output_index === 'number' ? data.output_index : 0,
-              ),
+              index: denseIndex(state, outputIndex),
               function: { arguments: delta },
             },
+          ],
+        },
+        finish_reason: null,
+      },
+      model,
+    );
+  }
+
+  // Parallel calls can arrive with no deltas, only the full arguments on `.done`.
+  if (eventType === 'response.function_call_arguments.done') {
+    const data = safeParse(dataStr);
+    if (!data || typeof data.arguments !== 'string' || !state) return null;
+    const outputIndex = typeof data.output_index === 'number' ? data.output_index : 0;
+    if (state.argsStreamed?.has(outputIndex)) return null;
+    (state.argsStreamed ??= new Set()).add(outputIndex);
+    return formatSSE(
+      {
+        delta: {
+          tool_calls: [
+            { index: denseIndex(state, outputIndex), function: { arguments: data.arguments } },
           ],
         },
         finish_reason: null,
@@ -544,7 +582,7 @@ function incompleteFinishReason(response: Record<string, unknown> | undefined): 
 
 function extractResponseUsage(
   response: Record<string, unknown> | undefined,
-): Record<string, number> | undefined {
+): Record<string, unknown> | undefined {
   const responseUsage = response?.usage as Record<string, unknown> | undefined;
   if (!responseUsage) return undefined;
   const inputDetails = responseUsage.input_tokens_details as Record<string, number> | undefined;
@@ -555,6 +593,7 @@ function extractResponseUsage(
     cache_read_tokens: inputDetails?.cached_tokens ?? 0,
     cache_creation_tokens:
       inputDetails?.cache_write_tokens ?? inputDetails?.cache_creation_input_tokens ?? 0,
+    ...reasoningTokensDetails(responseUsage),
   };
 }
 
@@ -637,6 +676,12 @@ export function collectChatGptSseResponse(sseText: string, model: string): Recor
       const tc = toolCallMap.get(idx);
       if (tc) {
         tc.function.arguments += typeof data.delta === 'string' ? data.delta : '';
+      }
+    } else if (eventType === 'response.function_call_arguments.done') {
+      const idx = typeof data.output_index === 'number' ? data.output_index : 0;
+      const tc = toolCallMap.get(idx);
+      if (tc && typeof data.arguments === 'string') {
+        tc.function.arguments = data.arguments;
       }
     } else if (eventType === 'response.completed') {
       const response = isObjectRecord(data.response) ? data.response : undefined;

@@ -1385,6 +1385,34 @@ describe('Google Adapter', () => {
       });
     });
 
+    it.each([
+      ['null', 'null'],
+      ['array', '[]'],
+    ])('treats a %s JSON arguments string as an empty object', (_label, args) => {
+      const body = {
+        messages: [
+          {
+            role: 'assistant',
+            content: null,
+            tool_calls: [
+              {
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'noop', arguments: args },
+              },
+            ],
+          },
+        ],
+      };
+      const result = toGoogleRequest(body, 'gemini-2.0-flash');
+      const contents = result.contents as Array<{ parts: Array<Record<string, unknown>> }>;
+      expect(contents[0].parts[0].functionCall).toEqual({
+        id: 'call_1',
+        name: 'noop',
+        args: {},
+      });
+    });
+
     it('handles tool_calls in assistant messages', () => {
       const body = {
         messages: [
@@ -1698,6 +1726,32 @@ describe('Google Adapter', () => {
       expect(JSON.parse(fn.arguments)).toEqual({ query: 'cats' });
     });
 
+    it.each([
+      ['null args', { name: 'noop', args: null }],
+      ['omitted args', { name: 'noop' }],
+    ])('serializes a no-argument functionCall (%s) as {}', (_label, functionCall) => {
+      const result = fromGoogleResponse(
+        {
+          candidates: [
+            {
+              content: { parts: [{ functionCall }] },
+              finishReason: 'STOP',
+            },
+          ],
+        },
+        'gemini-2.0-flash',
+      );
+      const choices = result.choices as Array<{ message: Record<string, unknown> }>;
+      const toolCalls = choices[0].message.tool_calls as Array<{
+        function: { name: string; arguments: string };
+      }>;
+      // Chat clients require arguments to be a JSON object string. A missing
+      // field is dropped on the wire, and the string "null" is not an object.
+      expect(JSON.stringify(toolCalls[0].function)).toBe(
+        JSON.stringify({ name: 'noop', arguments: '{}' }),
+      );
+    });
+
     it('handles empty candidates', () => {
       const result = fromGoogleResponse({ candidates: [] }, 'gemini-2.0-flash');
       const choices = result.choices as unknown[];
@@ -1793,6 +1847,19 @@ describe('Google Adapter', () => {
       const result = fromGoogleResponse({}, 'gemini-2.0-flash');
       const choices = result.choices as unknown[];
       expect(choices).toHaveLength(0);
+    });
+
+    it('maps a prompt blocked by promptFeedback to a content_filter choice', () => {
+      const google = {
+        promptFeedback: { blockReason: 'PROHIBITED_CONTENT' },
+        usageMetadata: { promptTokenCount: 7, totalTokenCount: 7 },
+      };
+      const result = fromGoogleResponse(google, 'gemini-2.0-flash');
+      const choices = result.choices as Array<Record<string, unknown>>;
+      expect(choices).toHaveLength(1);
+      expect(choices[0].finish_reason).toBe('content_filter');
+      expect(choices[0].message).toEqual({ role: 'assistant', content: null });
+      expect((result.usage as Record<string, number>).prompt_tokens).toBe(7);
     });
 
     it('returns null content when parts have no text', () => {
@@ -2412,6 +2479,19 @@ describe('Google Adapter', () => {
         expect(out.map((e) => e.choices[0]?.finish_reason ?? null)).toEqual([
           null,
           'tool_calls',
+          null,
+        ]);
+        expect(out.filter((e) => e.usage)).toHaveLength(1);
+      });
+
+      it('closes with content_filter on a promptFeedback block with no candidates', () => {
+        const blocked = JSON.stringify({
+          promptFeedback: { blockReason: 'SAFETY' },
+          usageMetadata: { promptTokenCount: 4, totalTokenCount: 4 },
+        });
+        const out = runStream([blocked]);
+        expect(out.map((e) => e.choices[0]?.finish_reason ?? null)).toEqual([
+          'content_filter',
           null,
         ]);
         expect(out.filter((e) => e.usage)).toHaveLength(1);
