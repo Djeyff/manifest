@@ -18,6 +18,8 @@ import {
   SUCCESS_STATUS_SQL_LIST,
   MANIFEST_ORIGIN_PREDICATE,
   CUSTOM_PROVIDER_JOIN_CONDITION,
+  WALLET_NAME_EXPR,
+  WALLET_COLOR_EXPR,
   excludePlaygroundAgents,
   sqlExcludePlayground,
   excludeDirectAttempts,
@@ -600,6 +602,11 @@ export class MessagesQueryService {
       .addSelect(picked('at.header_tier_color'), 'header_tier_color')
       .addSelect(picked('at.provider_key_label'), 'provider_key_label')
       .addSelect(picked('cp.name'), 'custom_provider_name')
+      // Wallet chip: the wallet that owns the key which SERVED the request
+      // (RET-692-FU1). Picked from the same winning attempt as the model and
+      // the key label above, so the chip names the payer of this request.
+      .addSelect(picked(WALLET_NAME_EXPR), 'wallet_name')
+      .addSelect(picked(WALLET_COLOR_EXPR), 'wallet_color')
       .addSelect('COALESCE(BOOL_OR(at.autofix_applied), false)', 'autofix_applied')
       .addSelect(
         `CASE WHEN COALESCE(BOOL_OR(at.autofix_applied), false) THEN 'retry' ELSE NULL END`,

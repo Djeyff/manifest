@@ -53,4 +53,13 @@ export class HeaderTier {
 
   @Column(timestampType(), { default: timestampDefault() })
   updated_at!: string;
+
+  /**
+   * Architect answer-only tier policy (RET-692): when true, requests on this
+   * tier are only admitted while answering an owner message (the request
+   * carries an `x-manifest-trigger: owner-…` header set by the coordinator
+   * turn). See routing/proxy/wallet-budget.ts.
+   */
+  @Column('boolean', { default: false })
+  architect_answer_only!: boolean;
 }

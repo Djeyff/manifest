@@ -12,6 +12,10 @@ export interface MessageRow {
   header_tier_id?: string;
   header_tier_name?: string;
   header_tier_color?: string;
+  /** Wallet that owns the key which served this request. Null when the key belongs to no wallet. */
+  wallet_name?: string | null;
+  /** Wallet chip color: a palette token ('indigo') or a hex color ('#4f46e5'). */
+  wallet_color?: string | null;
   input_tokens: number | null;
   output_tokens: number | null;
   total_tokens: number | null;
@@ -55,7 +59,8 @@ export type MessageColumnKey =
   | 'status'
   | 'attempts'
   | 'selfheal'
-  | 'agent';
+  | 'agent'
+  | 'wallet';
 
 // Reading order: identity first (status, when, who, what), THEN the
 // mechanics (attempts, recovery attempts), then payload and usage. The global
@@ -87,3 +92,20 @@ export const DETAILED_COLUMNS: MessageColumnKey[] = [
   'cache',
   'duration',
 ];
+
+/**
+ * Columns for the Requests page.
+ *
+ * Global mode spans every harness, so the Harness column is inserted and the
+ * Wallet column follows it immediately: `... 'agent', 'wallet', 'model' ...`.
+ * Per-harness mode has no Harness column, so the Wallet column sits right
+ * after 'model' to keep the identity columns together.
+ */
+export function buildRequestColumns(global: boolean): MessageColumnKey[] {
+  const base = DETAILED_COLUMNS;
+  const at = base.indexOf('model');
+  if (global) {
+    return [...base.slice(0, at), 'agent' as const, 'wallet' as const, ...base.slice(at)];
+  }
+  return [...base.slice(0, at + 1), 'wallet' as const, ...base.slice(at + 1)];
+}

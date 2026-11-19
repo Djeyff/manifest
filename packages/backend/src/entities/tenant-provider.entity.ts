@@ -53,4 +53,28 @@ export class TenantProvider {
 
   @Column(timestampType(), { nullable: true, default: null })
   models_fetched_at!: string | null;
+
+  /**
+   * Wallet budget lines (RET-692): daily_usd, weekly_usd, week_anchor_utc,
+   * night_window {start, end, offset_minutes}, allow[] — the shape parsed by
+   * routing/proxy/wallet-budget.ts. Null = the wallet is ungoverned. Extra
+   * keys are tolerated by the parser; only the fields below are typed.
+   */
+  @Column('jsonb', { nullable: true, default: null })
+  budget?: TenantProviderBudget | null;
+}
+
+/** The jsonb document stored in `tenant_providers.budget` (RET-692). */
+export interface TenantProviderBudget {
+  daily_usd?: number | null;
+  weekly_usd?: number | null;
+  /** "HH:MM" UTC time anchoring the weekly pool reset (Monday-based). */
+  week_anchor_utc?: string | null;
+  night_window?: {
+    start?: string | null;
+    end?: string | null;
+    offset_minutes?: number | null;
+  } | null;
+  /** Caller tier/agent names (+ "owner-answer") exempt from the night window. */
+  allow?: string[] | null;
 }

@@ -29,6 +29,7 @@ import { ModelsDevReasoningCatalog } from './reasoning-model-catalog';
 import { CodexSessionAffinity } from './codex-session-affinity';
 import { ProxyExceptionFilter } from './proxy-exception.filter';
 import { AttemptRecordingService } from './attempt-recording.service';
+import { WalletBudgetService } from './wallet-budget.service';
 
 @Module({
   imports: [
@@ -61,6 +62,7 @@ import { AttemptRecordingService } from './attempt-recording.service';
     CodexSessionAffinity,
     ProxyExceptionFilter,
     AttemptRecordingService,
+    WalletBudgetService,
   ],
   exports: [ProviderClient],
 })
