@@ -1,4 +1,4 @@
-import { Injectable, Logger, HttpStatus } from '@nestjs/common';
+import { Injectable, Logger, HttpStatus, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ResolveService } from '../resolve/resolve.service';
 import { ModelDiscoveryService } from '../../model-discovery/model-discovery.service';
@@ -58,6 +58,12 @@ import {
   type ResolvedRouteCredentials,
   type RouteCredentialDeps,
 } from './route-credentials';
+import {
+  triggerHeaderValue,
+  WALLET_BUDGET_HTTP_STATUS,
+  type WalletGateCallerContext,
+} from './wallet-budget';
+import { WalletBudgetService } from './wallet-budget.service';
 import { peekStream, STREAM_WARMUP_MS } from './stream-warmup';
 import { toChatCompletionsRequest } from './responses-adapter';
 import { messagesToChatCompletionsRequest } from './anthropic-messages-adapter';
@@ -252,6 +258,8 @@ export class ProxyService {
     private readonly modelParamsService: AgentModelParamsService,
     private readonly providerParamSpecs: ProviderParamSpecService,
     private readonly autofixService: AutofixService,
+    @Optional()
+    private readonly walletBudget?: WalletBudgetService,
   ) {}
 
   async proxyRequest(opts: ProxyRequestOptions): Promise<ProxyResult> {
@@ -310,11 +318,42 @@ export class ProxyService {
     }
 
     const route = resolved.route;
-    const credentials = await this.resolveCredentials(agentId, tenantId, {
-      provider: route.provider,
-      auth_type: route.authType,
-      provider_key_label: route.keyLabel ?? undefined,
-    });
+
+    // Wallet budgets (RET-692): architect answer-only tiers refuse
+    // autonomous work BEFORE any credential resolution — an owner-answer
+    // trigger header (x-manifest-trigger: owner-…) is the only way through.
+    // walletCaller then feeds the night-window allowlist at the admission
+    // gate inside resolveRouteCredentials.
+    const walletCaller: WalletGateCallerContext = {
+      agentName,
+      tierName: (await this.walletBudget?.tierNameFor(resolved.header_tier_id ?? null)) ?? undefined,
+      triggerHeader: triggerHeaderValue(headers),
+    };
+    const tierPolicyVars = await this.walletBudget?.tierPolicyBlock(
+      resolved.header_tier_id ?? null,
+      walletCaller,
+    );
+    if (tierPolicyVars) {
+      const message = formatManifestError('M200', {
+        ...tierPolicyVars,
+        dashboardUrl: getDashboardUrl(this.config, agentName, 'routing'),
+      });
+      this.logger.warn(
+        `Wallet budget: architect answer-only tier refused agent=${agentId} tier=${resolved.header_tier_id ?? 'none'}`,
+      );
+      return buildFriendlyResponse(message, stream, 'limit_exceeded', 'M200');
+    }
+
+    const credentials = await this.resolveCredentials(
+      agentId,
+      tenantId,
+      {
+        provider: route.provider,
+        auth_type: route.authType,
+        provider_key_label: route.keyLabel ?? undefined,
+      },
+      { caller: walletCaller, dashboardUrl: getDashboardUrl(this.config, agentName, 'routing') },
+    );
 
     const primaryModel = normalizeProviderModel(route.provider, route.model);
     this.logger.log(
@@ -375,11 +414,9 @@ export class ProxyService {
     // same fallback chain as HTTP failures — do not silently promote a
     // fallback to primary.
     if (!credentials.ok) {
-      const credentialFailure = presentCredentialFailure(
-        credentials.reason,
-        route.provider,
-        dashboardUrl,
-      );
+      const credentialFailure =
+        credentials.presentation ??
+        presentCredentialFailure(credentials.reason, route.provider, dashboardUrl);
       this.logger.warn(
         `Primary ${route.provider}/${primaryModel} credentials unusable for ` +
           `agent=${agentId} reason=${credentials.reason}`,
@@ -428,6 +465,7 @@ export class ProxyService {
           startProviderAttempt,
           credentialDashboardUrl: dashboardUrl,
           clientAnthropicBeta: headers?.['anthropic-beta'],
+          walletCaller,
         });
         if (fallbackResult) return fallbackResult;
       }
@@ -554,6 +592,7 @@ export class ProxyService {
         startProviderAttempt,
         credentialDashboardUrl: dashboardUrl,
         clientAnthropicBeta: headers?.['anthropic-beta'],
+        walletCaller,
       });
       if (fallbackResult) {
         return {
@@ -643,6 +682,7 @@ export class ProxyService {
           startProviderAttempt,
           credentialDashboardUrl: dashboardUrl,
           clientAnthropicBeta: headers?.['anthropic-beta'],
+          walletCaller,
         });
         if (fallbackResult) {
           return {
@@ -1153,6 +1193,7 @@ export class ProxyService {
         kiroOauth: this.kiroOauth,
         xaiOauth: this.xaiOauth,
       },
+      walletBudget: this.walletBudget,
     };
   }
 
@@ -1160,6 +1201,7 @@ export class ProxyService {
     agentId: string,
     tenantId: string,
     resolved: { provider: string; auth_type?: AuthType; provider_key_label?: string },
+    gate?: { caller?: WalletGateCallerContext; dashboardUrl?: string },
   ): Promise<ResolvedRouteCredentials> {
     return resolveRouteCredentials(this.routeCredentialDeps(), {
       agentId,
@@ -1167,6 +1209,8 @@ export class ProxyService {
       provider: resolved.provider,
       authType: resolved.auth_type,
       providerKeyLabel: resolved.provider_key_label,
+      walletCaller: gate?.caller,
+      dashboardUrl: gate?.dashboardUrl,
     });
   }
 
@@ -1221,6 +1265,8 @@ export class ProxyService {
     credentialDashboardUrl?: string;
     /** The caller's raw `anthropic-beta` header, forwarded on an Anthropic hop. */
     clientAnthropicBeta?: string | string[];
+    /** Caller context for the wallet-budget gate on every fallback hop. */
+    walletCaller?: WalletGateCallerContext;
   }): Promise<ProxyResult | null> {
     const {
       agentId,
@@ -1274,6 +1320,7 @@ export class ProxyService {
       providerCacheKey,
       sessionCacheKey,
       args.clientAnthropicBeta,
+      args.walletCaller,
     );
 
     this.recordTierIfScoring(sessionMomentumKey, resolved.tier);

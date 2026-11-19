@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import type { AuthType, ModelRoute } from 'manifest-shared';
@@ -56,6 +56,8 @@ interface ForwardProviderOptions {
 }
 
 import { ProviderKeyService } from '../routing-core/provider-key.service';
+import type { WalletGateCallerContext } from './wallet-budget';
+import { WalletBudgetService } from './wallet-budget.service';
 import { CustomProvider } from '../../entities/custom-provider.entity';
 import { CustomProviderService } from '../custom-provider/custom-provider.service';
 import { resolveForwardEndpoint } from './forward-endpoint-resolver';
@@ -169,6 +171,8 @@ export class ProxyFallbackService {
     private readonly providerParamSpecs: ProviderParamSpecService,
     private readonly reasoningCache: ReasoningContentCache,
     private readonly autofixService: AutofixService,
+    @Optional()
+    private readonly walletBudget?: WalletBudgetService,
   ) {}
 
   /**
@@ -224,6 +228,13 @@ export class ProxyFallbackService {
     reasoningCacheKey?: string,
     /** The caller's raw `anthropic-beta` header; a fallback hop onto Anthropic needs it too. */
     clientAnthropicBeta?: string | string[],
+    /**
+     * Caller context for the wallet budget gate (RET-692): tier/agent name
+     * plus the owner-answer trigger header. Each fallback hop resolves its
+     * own credentials, so the gate must see the same caller context the
+     * primary hop saw.
+     */
+    walletCaller?: WalletGateCallerContext,
   ): Promise<{
     success: {
       forward: ForwardResult;
@@ -301,6 +312,7 @@ export class ProxyFallbackService {
         provider,
         authType,
         providerKeyLabel,
+        walletCaller,
       });
       if (!credentials.ok) {
         this.logger.debug(
@@ -584,6 +596,7 @@ export class ProxyFallbackService {
         kiroOauth: this.kiroOauth,
         xaiOauth: this.xaiOauth,
       },
+      walletBudget: this.walletBudget,
     };
   }
 
