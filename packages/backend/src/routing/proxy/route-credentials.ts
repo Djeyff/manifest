@@ -26,6 +26,7 @@ import type { ProviderAttemptRef, StartProviderAttempt } from './proxy-types';
 import {
   orderCandidates,
   walletBudgetMessage,
+  walletGovernsBudget,
   WALLET_BUDGET_HTTP_STATUS,
   type WalletBudgetConfig,
   type WalletBudgetDecision,
@@ -296,8 +297,28 @@ async function selectServingKey(
     spend: WalletSpend;
   } | null = null;
 
+  /**
+   * Wallets already refused in this chain (RET-692-FU1, design lock
+   * D-2026-11-18-10). A wallet is the unit of policy: once one of its
+   * member keys is refused over the wallet's line, the router JUMPS to the
+   * next wallet — it never tries another member key of the same (already
+   * refused) wallet and never serves that wallet again later in the chain.
+   *
+   * Keys that belong to no wallet (or whose wallet has no usable budget, so
+   * the legacy per-key line governs) are their own group and behave as
+   * before.
+   */
+  const refusedGroups = new Set<string>();
+
   for (const candidate of ordered) {
     if (candidate.apiKey === null) continue;
+    const target = gate.walletTarget ? await gate.walletTarget(candidate.id) : null;
+    // Only a WALLET-GOVERNED key groups with its wallet: when the wallet has
+    // no usable budget the key's own legacy line governs, so each key stays
+    // its own group.
+    const governedByWallet = target !== null && walletGovernsBudget(target);
+    const groupId = governedByWallet ? `wallet:${target.wallet_id}` : `key:${candidate.id}`;
+    if (refusedGroups.has(groupId)) continue;
     const parsed = await gate.configFor(candidate.id);
     if (!parsed.config) {
       // Ungoverned wallet: no lines set, serves as before.
@@ -305,10 +326,13 @@ async function selectServingKey(
     }
     const { spend, decision } = await gate.decide(parsed.config, candidate.id, caller, now);
     if (decision.allowed) return { key: candidate, selectedByGate: true };
+    refusedGroups.add(groupId);
+    // The receipt names the WALLET (not the key) when the wallet governs.
+    const label = governedByWallet && target ? target.name : candidate.label;
     if (!firstBlocked) {
-      firstBlocked = { id: candidate.id, label: candidate.label, decision, config: parsed.config, spend };
+      firstBlocked = { id: candidate.id, label, decision, config: parsed.config, spend };
     }
-    gate.noteBlocked(candidate.label, decision, parsed.config, spend, caller);
+    gate.noteBlocked(label, decision, parsed.config, spend, caller);
   }
 
   if (firstBlocked && gate.mode() === 'enforce') {

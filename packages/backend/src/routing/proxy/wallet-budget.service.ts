@@ -18,6 +18,7 @@ import {
   type WalletBudgetMode,
   type WalletGateCallerContext,
   type WalletSpend,
+  type WalletTarget,
 } from './wallet-budget';
 
 /** M200 template variables for the architect answer-only tier policy. */
@@ -88,8 +89,40 @@ export class WalletBudgetService implements WalletBudgetGate {
     }));
   }
 
-  /** Fresh read + parse of the wallet's `budget` column. Ungoverned → config null. */
+  /**
+   * The wallet that owns a provider key (RET-692-FU1), or null when the key
+   * belongs to no wallet.
+   *
+   * Tenant-scoped: a wallet only ever matches keys of its own tenant, so a
+   * cross-tenant key can never inherit another tenant's wallet line.
+   */
+  async walletTarget(tenantProviderId: string): Promise<WalletTarget | null> {
+    const wallet = await this.resolveWallet(tenantProviderId);
+    if (!wallet) return null;
+    return {
+      wallet_id: wallet.wallet_id,
+      name: wallet.name,
+      color: wallet.color,
+      member_key_ids: wallet.member_key_ids,
+      governs: wallet.governs,
+    };
+  }
+
+  /**
+   * The budget that GOVERNS this key (RET-692-FU1).
+   *
+   * Fallback rule (documented contract):
+   *  - key in a wallet whose wallet budget is usable → the WALLET budget
+   *    governs (the wallet is the unit of policy);
+   *  - key in a wallet whose wallet budget is missing/unusable → fall back to
+   *    the key's own legacy `tenant_providers.budget` line;
+   *  - key in no wallet → the legacy per-key line, as before.
+   */
   async configFor(tenantProviderId: string): Promise<ParsedWalletBudget> {
+    const wallet = await this.resolveWallet(tenantProviderId);
+    if (wallet?.governs) {
+      return parseWalletBudget(wallet.budget);
+    }
     const rows: Array<{ budget: unknown }> = await this.dataSource.query(
       `SELECT "budget" FROM "tenant_providers" WHERE "id" = $1`,
       [tenantProviderId],
@@ -108,6 +141,21 @@ export class WalletBudgetService implements WalletBudgetGate {
     config: WalletBudgetConfig,
     now: Date,
   ): Promise<WalletSpend> {
+    return this.spendForScope([tenantProviderId], config, now);
+  }
+
+  /**
+   * Spend over a SCOPE of provider keys.
+   *
+   * Per-key scope → the legacy per-key line. Wallet scope → the sum over
+   * EVERY member key of the wallet, because the wallet's line is charged by
+   * the whole group, not by the key that happens to pay.
+   */
+  async spendForScope(
+    scopeKeyIds: string[],
+    config: WalletBudgetConfig,
+    now: Date,
+  ): Promise<WalletSpend> {
     const dayStart = dayWindowStart(now, WALLET_NIGHT_WINDOW_DEFAULT_OFFSET_MINUTES);
     const weekStart = weekWindowStart(now, config.week_anchor_utc ?? '00:00');
     const rows: SpendRow[] = await this.dataSource.query(
@@ -115,8 +163,8 @@ export class WalletBudgetService implements WalletBudgetGate {
          COALESCE(SUM("cost_usd") FILTER (WHERE "timestamp" >= $2), 0) AS "day_usd",
          COALESCE(SUM("cost_usd") FILTER (WHERE "timestamp" >= $3), 0) AS "week_usd"
        FROM "agent_messages"
-       WHERE "tenant_provider_id" = $1`,
-      [tenantProviderId, dayStart.toISOString(), weekStart.toISOString()],
+       WHERE "tenant_provider_id" = ANY($1)`,
+      [scopeKeyIds, dayStart.toISOString(), weekStart.toISOString()],
     );
     return {
       day_usd: toNumber(rows?.[0]?.day_usd),
@@ -130,8 +178,56 @@ export class WalletBudgetService implements WalletBudgetGate {
     caller: WalletGateCallerContext,
     now: Date,
   ): Promise<{ spend: WalletSpend; decision: WalletBudgetDecision }> {
-    const spend = await this.spendFor(tenantProviderId, config, now);
-    return { spend, decision: evaluateWalletBudget(config, spend, caller, now) };
+    const wallet = await this.resolveWallet(tenantProviderId);
+    // Wallet-governed → the wallet's own lines and the wallet-wide spend
+    // scope (sum over all member keys). Otherwise → the legacy per-key line
+    // and the per-key spend scope.
+    const effectiveConfig = wallet?.governs ? parseWalletBudget(wallet.budget).config! : config;
+    const scope = wallet?.governs ? wallet.member_key_ids : [tenantProviderId];
+    const spend = await this.spendForScope(scope, effectiveConfig, now);
+    return { spend, decision: evaluateWalletBudget(effectiveConfig, spend, caller, now) };
+  }
+
+  /** The wallet row (with its raw budget) that owns this key, if any. */
+  private async resolveWallet(tenantProviderId: string): Promise<
+    (WalletTarget & { budget: unknown; governs: boolean }) | null
+  > {
+    const rows: Array<{
+      wallet_id: string;
+      name: string;
+      color: string;
+      budget: unknown;
+      member_key_ids: string[] | null;
+    }> = await this.dataSource.query(
+      `SELECT
+         w."id" AS "wallet_id",
+         w."name" AS "name",
+         w."color" AS "color",
+         w."budget" AS "budget",
+         (
+           SELECT array_agg(m2."tenant_provider_id")
+           FROM "wallet_members" m2
+           WHERE m2."wallet_id" = w."id"
+             AND m2."tenant_id" = w."tenant_id"
+         ) AS "member_key_ids"
+       FROM "wallet_members" m
+       JOIN "wallets" w
+         ON w."id" = m."wallet_id"
+        AND w."tenant_id" = m."tenant_id"
+       WHERE m."tenant_provider_id" = $1
+       LIMIT 1`,
+      [tenantProviderId],
+    );
+    const row = rows?.[0];
+    if (!row) return null;
+    return {
+      wallet_id: row.wallet_id,
+      name: row.name,
+      color: row.color,
+      member_key_ids: row.member_key_ids ?? [],
+      budget: row.budget,
+      governs: parseWalletBudget(row.budget).config !== null,
+    };
   }
 
   noteBlocked(

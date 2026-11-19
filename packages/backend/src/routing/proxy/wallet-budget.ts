@@ -344,6 +344,43 @@ export function triggerHeaderValue(
 }
 
 /**
+ * The wallet that owns a provider key (RET-692-FU1).
+ *
+ * A wallet is a NAMED GROUP of provider keys: the wallet owns the budget
+ * lines that govern its members, and the spend charged to the wallet is the
+ * sum over ALL of its member keys.
+ */
+export interface WalletTarget {
+  wallet_id: string;
+  name: string;
+  color: string;
+  /** every member key id of the wallet (the wallet's spend scope) */
+  member_key_ids: string[];
+  /**
+   * True when the wallet's OWN budget is usable and therefore governs every
+   * member key (wallet-wide spend scope). When false, each member key falls
+   * back to its legacy per-key `tenant_providers.budget` line.
+   *
+   * Optional: a gate that does not expose it is treated as wallet-governed.
+   */
+  governs?: boolean;
+}
+
+/**
+ * True when the WALLET's own budget governs its member keys.
+ *
+ * Wallet-granularity rule (RET-692-FU1):
+ *  - key in a wallet WITH a usable wallet budget → the WALLET budget governs
+ *    and the spend charged to it is the sum over ALL member keys;
+ *  - key in a wallet WITHOUT a usable wallet budget → fall back to the key's
+ *    own legacy per-key line (per-key spend scope);
+ *  - key in no wallet → the legacy per-key line, as before.
+ */
+export function walletGovernsBudget(target: WalletTarget): boolean {
+  return target.governs !== false;
+}
+
+/**
  * The admission gate `resolveRouteCredentials` consults when wallet budgets
  * govern. Implemented by WalletBudgetService; kept as an interface so the
  * routing module depends on the contract, not on Nest wiring, and specs can
@@ -362,6 +399,8 @@ export interface WalletBudgetGate {
   ): Promise<Array<{ id: string; label: string; apiKey: string | null; region?: string | null }>>;
   /** Fresh read + parse of one wallet's `budget` column (config null = ungoverned). */
   configFor(tenantProviderId: string): Promise<ParsedWalletBudget>;
+  /** The wallet that owns this key, or null when the key belongs to no wallet. */
+  walletTarget?(tenantProviderId: string): Promise<WalletTarget | null>;
   /** Spend aggregation + decision for one wallet, evaluated at `now`. */
   decide(
     config: WalletBudgetConfig,

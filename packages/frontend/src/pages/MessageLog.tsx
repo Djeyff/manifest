@@ -19,7 +19,7 @@ import Select from '../components/Select.jsx';
 import MultiSelect, { type MultiSelectOption } from '../components/MultiSelect.jsx';
 import { getProviders as getProviderConnections } from '../services/api/providers.js';
 import SetupModal from '../components/SetupModal.jsx';
-import { DETAILED_COLUMNS, type MessageRow } from '../components/message-table-types.js';
+import { buildRequestColumns, type MessageRow } from '../components/message-table-types.js';
 import { AutofixIcon, FallbackIcon } from '../components/message-table-cells.jsx';
 import { agentDisplayName } from '../services/agent-display-name.js';
 import { agentPlatform, agentCategory } from '../services/agent-platform-store.js';
@@ -139,13 +139,7 @@ const MessageLog: Component = () => {
   const navigate = useNavigate();
 
   preloadModelDisplayNames();
-  const columns = () => {
-    const base = DETAILED_COLUMNS;
-    if (params.agentName) return base;
-    // Global Messages spans every harness, so show which harness each row belongs to.
-    const at = base.indexOf('model');
-    return [...base.slice(0, at), 'agent' as const, ...base.slice(at)];
-  };
+  const columns = () => buildRequestColumns(!params.agentName);
   // Seed from ?agent= (set by AgentMessagesRedirect) so "View more" on a
   // harness overview lands pre-filtered; only meaningful in global mode —
   // when the route itself carries an agent, that param scopes the query.

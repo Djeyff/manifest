@@ -346,6 +346,34 @@ export const CUSTOM_PROVIDER_JOIN_CONDITION = "at.provider = 'custom:' || cp.id"
 export const PROVIDER_SERIES_KEY_EXPR =
   "CASE WHEN at.provider LIKE 'custom:%' THEN COALESCE(cp.name, 'Deleted provider') ELSE at.provider END";
 
+/**
+ * Wallet attribution for a provider attempt (RET-692-FU1).
+ *
+ * The WALLET chip on the Requests page names the wallet that owns the key
+ * which SERVED the request. A key belongs to at most one wallet (unique index
+ * on `wallet_members.tenant_provider_id`), so the subquery yields at most one
+ * row.
+ *
+ * These are scalar subqueries on purpose: the request log aggregates attempts
+ * with ARRAY_AGG and GROUP BY, and a JOIN would multiply the attempt rows
+ * (and with them the token/cost sums). A subquery keeps the row set intact.
+ */
+export const WALLET_NAME_EXPR = `(
+  SELECT w.name
+  FROM wallet_members wm
+  JOIN wallets w ON w.id = wm.wallet_id
+  WHERE wm.tenant_provider_id = at.tenant_provider_id
+  LIMIT 1
+)`;
+
+export const WALLET_COLOR_EXPR = `(
+  SELECT w.color
+  FROM wallet_members wm
+  JOIN wallets w ON w.id = wm.wallet_id
+  WHERE wm.tenant_provider_id = at.tenant_provider_id
+  LIMIT 1
+)`;
+
 export const MESSAGE_ROW_SELECT_ALIASES = [
   'id',
   'timestamp',
@@ -377,6 +405,8 @@ export const MESSAGE_ROW_SELECT_ALIASES = [
   'custom_provider_name',
   'autofix_applied',
   'autofix_role',
+  'wallet_name',
+  'wallet_color',
 ] as const;
 
 export function selectMessageRowColumns<T extends ObjectLiteral>(
@@ -414,5 +444,8 @@ export function selectMessageRowColumns<T extends ObjectLiteral>(
     .addSelect('at.provider_key_label', 'provider_key_label')
     .addSelect('cp.name', 'custom_provider_name')
     .addSelect('at.autofix_applied', 'autofix_applied')
-    .addSelect('at.autofix_role', 'autofix_role');
+    .addSelect('at.autofix_role', 'autofix_role')
+    // Wallet chip for the key that served the request (RET-692-FU1).
+    .addSelect(WALLET_NAME_EXPR, 'wallet_name')
+    .addSelect(WALLET_COLOR_EXPR, 'wallet_color');
 }

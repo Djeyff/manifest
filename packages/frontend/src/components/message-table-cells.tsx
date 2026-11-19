@@ -93,6 +93,7 @@ const HEADER_LABELS: Record<MessageColumnKey, string> = {
   attempts: 'Attempts',
   selfheal: 'Recovery attempts',
   agent: 'Harness',
+  wallet: 'Wallet',
 };
 
 const TOOLTIP_TEXT: Partial<Record<MessageColumnKey, string>> = {
@@ -307,6 +308,62 @@ export function DurationCell(item: MessageRow): JSX.Element {
   );
 }
 
+/** Palette tokens shipped by the tier-color-* classes (data.css). */
+const WALETTE_PALETTE_TOKENS = new Set([
+  'slate',
+  'gray',
+  'zinc',
+  'stone',
+  'red',
+  'orange',
+  'amber',
+  'yellow',
+  'lime',
+  'green',
+  'emerald',
+  'teal',
+  'cyan',
+  'sky',
+  'blue',
+  'indigo',
+  'violet',
+  'purple',
+  'fuchsia',
+  'pink',
+  'rose',
+  'coral',
+  'brown',
+  'navy',
+]);
+
+const HEX_COLOR = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+
+/**
+ * The wallet that owns the key which served the request, as a small colored
+ * chip. `wallet_color` is either a palette token ('indigo') or a hex color
+ * ('#4f46e5'); anything else falls back to a neutral chip.
+ */
+export function WalletCell(item: MessageRow): JSX.Element {
+  const name = item.wallet_name?.trim();
+  if (!name) return <td style={MONO_XS}>{'\u2014'}</td>;
+  const raw = item.wallet_color?.trim() ?? '';
+  const token = WALETTE_PALETTE_TOKENS.has(raw) ? raw : null;
+  const hex = HEX_COLOR.test(raw) ? raw : null;
+  const cls = `tier-badge tier-badge--custom${token ? ` tier-color--${token}` : ''}`;
+  const style = hex
+    ? { 'background-color': hex, color: '#fff' }
+    : token
+      ? undefined
+      : { 'background-color': 'hsl(var(--muted) / 0.6)', color: 'hsl(var(--muted-foreground))' };
+  return (
+    <td style="white-space: nowrap;">
+      <span class={cls} style={style} title={name}>
+        {name}
+      </span>
+    </td>
+  );
+}
+
 export function AgentCell(
   item: MessageRow,
   platformLookup?: (
@@ -516,5 +573,7 @@ export function renderCell(
       return SelfHealCell(item);
     case 'agent':
       return AgentCell(item, ctx.agentPlatformLookup);
+    case 'wallet':
+      return WalletCell(item);
   }
 }

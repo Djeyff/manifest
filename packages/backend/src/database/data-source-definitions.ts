@@ -17,6 +17,7 @@ import { TierAssignment } from '../entities/tier-assignment.entity';
 import { CustomProvider } from '../entities/custom-provider.entity';
 import { SpecificityAssignment } from '../entities/specificity-assignment.entity';
 import { HeaderTier } from '../entities/header-tier.entity';
+import { Wallet, WalletMember } from '../entities/wallet.entity';
 import { InstallMetadata } from '../entities/install-metadata.entity';
 import { BackfillState } from '../entities/backfill-state.entity';
 import { AgentModelParams } from '../entities/agent-model-params.entity';
@@ -58,6 +59,7 @@ import { AddAgentMessagesDirectUsageIndex1802900000000 } from './migrations/1802
 import { CoverRequestsLogFilters1803000000000 } from './migrations/1803000000000-CoverRequestsLogFilters';
 import { CoverHarnessRequestsIndex1803100000000 } from './migrations/1803100000000-CoverHarnessRequestsIndex';
 import { AddWalletBudgetColumns1803200000000 } from './migrations/1803200000000-AddWalletBudgetColumns';
+import { CreateWallets1803300000000 } from './migrations/1803300000000-CreateWallets';
 import { InitialSchema1771464895790 } from './migrations/1771464895790-InitialSchema';
 import { HashApiKeys1771500000000 } from './migrations/1771500000000-HashApiKeys';
 import { ModelPricingImprovements1771600000000 } from './migrations/1771600000000-ModelPricingImprovements';
@@ -192,6 +194,8 @@ export const entities = [
   CustomProvider,
   SpecificityAssignment,
   HeaderTier,
+  Wallet,
+  WalletMember,
   InstallMetadata,
   AgentModelParams,
   PlaygroundRun,
@@ -354,4 +358,5 @@ export const migrations = [
   CoverRequestsLogFilters1803000000000,
   CoverHarnessRequestsIndex1803100000000,
   AddWalletBudgetColumns1803200000000,
+  CreateWallets1803300000000,
 ];
