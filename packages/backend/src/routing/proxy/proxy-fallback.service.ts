@@ -66,6 +66,7 @@ interface ForwardProviderOptions {
 import { ProviderKeyService } from '../routing-core/provider-key.service';
 import type { WalletGateCallerContext } from './wallet-budget';
 import { WalletBudgetService } from './wallet-budget.service';
+import { QuotaAccountingService } from './quota-accounting.service';
 import { CustomProvider } from '../../entities/custom-provider.entity';
 import { CustomProviderService } from '../custom-provider/custom-provider.service';
 import { resolveForwardEndpoint } from './forward-endpoint-resolver';
@@ -190,11 +191,8 @@ export class ProxyFallbackService {
     private readonly reasoningCache: ReasoningContentCache,
     private readonly autofixService: AutofixService,
     @Optional()
-<<<<<<< HEAD
     private readonly walletBudget?: WalletBudgetService,
-=======
     private readonly quotaAccounting?: QuotaAccountingService,
->>>>>>> 3608b365b
   ) {}
 
   /**
