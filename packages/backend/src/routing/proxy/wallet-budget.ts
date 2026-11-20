@@ -23,6 +23,11 @@
  *    the request carries an `x-manifest-trigger: owner-…` header set by the
  *    coordinator turn that is answering the owner) pass through; everyone
  *    else is rejected until the window closes.
+ *  - RET-695 final-day drain: on the final 24h before the wallet's
+ *    week_anchor_utc reset, the daily cap opens to the REMAINING weekly pool
+ *    (unused budget rolls over) so the wallet drains before the reset and
+ *    halts at zero. MANIFEST_WALLET_FINAL_DAY_DRAIN=0 restores the plain
+ *    daily line.
  *
  * This module is deliberately pure (no Nest, no DB, no fs) so the routing
  * gate and the specs can import it cheaply. Persistence and Nest lifecycle
@@ -75,7 +80,17 @@ export type WalletBudgetRule = 'daily_cap' | 'weekly_cap' | 'night_window';
 
 export type WalletBudgetDecision =
   | { allowed: true }
-  | { allowed: false; rule: WalletBudgetRule; detail: string };
+  | {
+      allowed: false;
+      rule: WalletBudgetRule;
+      detail: string;
+      /**
+       * RET-695 final-day drain: set when the binding daily line was the
+       * drain line (the remaining weekly pool), so the M200 presentation can
+       * show the true threshold. Absent for a plain daily cap.
+       */
+      drain?: { line_usd: number };
+    };
 
 /** Default window timezone: Santo Domingo (UTC-4, no DST). */
 export const WALLET_NIGHT_WINDOW_DEFAULT_OFFSET_MINUTES = -240;
@@ -222,7 +237,10 @@ export function inNightWindow(now: Date, window: WalletBudgetNightWindow): boole
 }
 
 /** UTC instant the current SDQ day opened (fixed offset, no DST). */
-export function dayWindowStart(now: Date, offsetMinutes = WALLET_NIGHT_WINDOW_DEFAULT_OFFSET_MINUTES): Date {
+export function dayWindowStart(
+  now: Date,
+  offsetMinutes = WALLET_NIGHT_WINDOW_DEFAULT_OFFSET_MINUTES,
+): Date {
   const shifted = now.getTime() + offsetMinutes * 60_000;
   return new Date(Math.floor(shifted / 86_400_000) * 86_400_000 - offsetMinutes * 60_000);
 }
@@ -235,6 +253,35 @@ export function weekWindowStart(now: Date, anchorUtc = '00:00'): Date {
   let start = utcMidnight - daysSinceMonday * 86_400_000 + anchorMinutes * 60_000;
   if (start > now.getTime()) start -= 7 * 86_400_000;
   return new Date(start);
+}
+
+/** UTC instant the current anchor week CLOSES (week open + 7 days). */
+export function nextWeeklyReset(now: Date, anchorUtc = '00:00'): Date {
+  return new Date(weekWindowStart(now, anchorUtc).getTime() + 7 * 86_400_000);
+}
+
+/**
+ * RET-695 final-day drain (owner rule: unused budget rolls over): the final
+ * day before the weekly reset is the last 24h window that closes at the
+ * reset instant (0 < hours left <= 24).
+ */
+export function isFinalDayBeforeWeeklyReset(now: Date, anchorUtc = '00:00'): boolean {
+  const hoursLeft = (nextWeeklyReset(now, anchorUtc).getTime() - now.getTime()) / 3_600_000;
+  return hoursLeft > 0 && hoursLeft <= 24;
+}
+
+/**
+ * Kill switch for the RET-695 final-day drain rule. Read fresh per request
+ * (WalletBudgetService.decide); the pure core takes the resolved flag so the
+ * decision stays env-free. Default ON — the switch KILLS the rule when
+ * explicitly set to 0/false/no, mirroring the governor's RET670_FINAL_DAY_DRAIN.
+ */
+export const WALLET_FINAL_DAY_DRAIN_ENV = 'MANIFEST_WALLET_FINAL_DAY_DRAIN';
+
+/** Parse the drain kill switch: absent/invalid → ON; 0/false/no → OFF. */
+export function resolveWalletFinalDayDrain(raw: string | undefined | null): boolean {
+  const value = (raw ?? '').trim().toLowerCase();
+  return !(value === '0' || value === 'false' || value === 'no');
 }
 
 /**
@@ -252,7 +299,10 @@ export function isOwnerAnswerTrigger(triggerHeader: string | null | undefined): 
  * (case-insensitively) the caller's tier or agent name, or when the entry is
  * the `owner-answer` pseudo-entry and the request carries an owner trigger.
  */
-export function callerIsAllowlisted(allow: string[] | null | undefined, caller: WalletGateCallerContext): boolean {
+export function callerIsAllowlisted(
+  allow: string[] | null | undefined,
+  caller: WalletGateCallerContext,
+): boolean {
   if (!allow || allow.length === 0) return false;
   const tier = (caller.tierName ?? '').trim().toLowerCase();
   const agent = (caller.agentName ?? '').trim().toLowerCase();
@@ -269,22 +319,53 @@ function fmtUsd(value: number): string {
 }
 
 /**
+ * Options for {@link evaluateWalletBudget}; see `finalDayDrain`.
+ */
+export interface WalletBudgetEvalOptions {
+  /**
+   * RET-695 final-day drain posture (kill switch). WalletBudgetService.decide
+   * passes resolveWalletFinalDayDrain(process.env[WALLET_FINAL_DAY_DRAIN_ENV]);
+   * direct callers default to ON, mirroring the live default.
+   */
+  finalDayDrain?: boolean;
+}
+
+/**
  * Decide one admission against one wallet. Order: daily cap, weekly cap,
  * then the night window. Caps are hard (never allowlist-bypassed); the night
- * window is a WHO filter and consults the allowlist.
+ * window is a WHO filter and consults the allowlist. On the final day before
+ * the weekly reset the daily cap IS the remaining weekly pool (RET-695
+ * final-day drain; the kill switch restores the plain daily line).
  */
 export function evaluateWalletBudget(
   config: WalletBudgetConfig,
   spend: WalletSpend,
   caller: WalletGateCallerContext,
   now: Date,
+  options?: WalletBudgetEvalOptions,
 ): WalletBudgetDecision {
   if (config.daily_usd !== undefined && config.daily_usd !== null) {
-    if (spend.day_usd >= config.daily_usd) {
+    // RET-695 final-day drain (owner rule: unused budget rolls over): on the
+    // final day before the wallet's weekly reset the daily stop OPENS to the
+    // REMAINING weekly pool (weekly line - week spend), so the wallet drains
+    // before its reset and halts at zero once the pool is gone. Inert
+    // without a weekly line; the kill switch restores the plain daily cap.
+    const drainActive =
+      (options?.finalDayDrain ?? true) &&
+      config.weekly_usd !== undefined &&
+      config.weekly_usd !== null &&
+      isFinalDayBeforeWeeklyReset(now, config.week_anchor_utc ?? '00:00');
+    const drainLine = drainActive ? Math.max(0, (config.weekly_usd ?? 0) - spend.week_usd) : null;
+    const dailyLine = drainLine ?? config.daily_usd;
+    if (spend.day_usd >= dailyLine) {
       return {
         allowed: false,
         rule: 'daily_cap',
-        detail: `day spend ${fmtUsd(spend.day_usd)} >= daily line ${fmtUsd(config.daily_usd)}`,
+        detail:
+          drainLine !== null
+            ? `day spend ${fmtUsd(spend.day_usd)} >= final-day drain line ${fmtUsd(drainLine)} (remaining weekly pool ${fmtUsd(Math.max(0, (config.weekly_usd ?? 0) - spend.week_usd))}) — the wallet drains before its weekly reset and halts at zero`
+            : `day spend ${fmtUsd(spend.day_usd)} >= daily line ${fmtUsd(config.daily_usd)}`,
+        ...(drainLine !== null ? { drain: { line_usd: drainLine } } : {}),
       };
     }
   }
@@ -435,7 +516,9 @@ export function walletBudgetMessage(
       return {
         metric: `${walletLabel} wallet daily cap`,
         used: fmtUsd(spend.day_usd),
-        threshold: fmtUsd(config.daily_usd ?? 0),
+        // RET-695: when the final-day drain binds, the threshold IS the
+        // drain line (the remaining weekly pool), not the configured line.
+        threshold: fmtUsd(decision.drain?.line_usd ?? config.daily_usd ?? 0),
         period: 'today (SDQ)',
       };
     case 'weekly_cap':
