@@ -1,4 +1,5 @@
 import { getBedrockInferenceProfileBaseModelId } from './bedrock-region';
+import { hasFunctionTools } from './function-tools';
 
 /** A Manifest API that a model serves on Bedrock Runtime. */
 export type BedrockRuntimeApi = 'chat_completions' | 'responses';
@@ -12,12 +13,15 @@ export interface BedrockRuntimeCapabilities {
   /** Exact base model ID. Lookups are case-sensitive. */
   modelId: string;
   /**
-   * Every entry must list both APIs: Manifest keeps the agent's API on Runtime
-   * and does not convert between them there.
+   * Every entry must list both APIs: Manifest keeps the agent's API on Runtime,
+   * except for the GPT chat requests `bedrockRuntimeChatNeedsResponses` sends to
+   * Responses.
    */
   apis: readonly BedrockRuntimeApi[];
   /** Chat Completions output cap the model accepts; GPT models reject `max_tokens`. */
   chatTokenParameter: 'max_tokens' | 'max_completion_tokens';
+  /** Rejects effort `none`, the only one Runtime Chat Completions takes next to function tools. */
+  rejectsReasoningNone?: true;
   /** AWS model card listing the model's Runtime APIs. */
   sourceUrl: string;
   /** Date the entry was checked live on Runtime. */
@@ -40,6 +44,7 @@ export const BEDROCK_RUNTIME_CAPABILITY_CATALOG: readonly BedrockRuntimeCapabili
     modelId: 'openai.gpt-6-astra',
     apis: CHAT_AND_RESPONSES,
     chatTokenParameter: 'max_completion_tokens',
+    rejectsReasoningNone: true,
     sourceUrl: `${AWS_MODEL_CARDS}/model-card-openai-gpt-6-astra.html`,
     verifiedAt: VERIFIED_AT,
   },
@@ -73,8 +78,17 @@ const CATALOG_BY_MODEL_ID = new Map(
 /**
  * Claude base models checked live on the Runtime `/anthropic/v1/messages`
  * endpoint. Bedrock does not publish which models it serves there (older
- * Sonnet 4.x and Opus 4.1-4.6 reject it with 404, Fable with a 400
- * data-retention error), so each entry is verified before it is added.
+ * Sonnet 4.x and Opus 4.1-4.6 reject it with 404), so each entry is verified
+ * before it is added.
+ *
+ * Fable 5 / 5.1 are served here through their cross-Region inference profiles
+ * (200 verified on the `us.` and `global.` profiles, 2026-11-03), but only when
+ * the account's Bedrock data retention mode for the Region is `aws_review` (or
+ * the legacy `provider_data_share`); otherwise Runtime answers 400
+ * ValidationException. `aws_review` retains prompts and completions within AWS
+ * for up to 30 days and lets AWS review them. It is the account owner's choice,
+ * set per Region on the Bedrock control plane:
+ * https://docs.aws.amazon.com/bedrock/latest/userguide/data-retention.html
  */
 export const BEDROCK_RUNTIME_CLAUDE_MESSAGES_MODELS: readonly {
   modelId: string;
@@ -90,6 +104,9 @@ export const BEDROCK_RUNTIME_CLAUDE_MESSAGES_MODELS: readonly {
   // AWS lists the us./global. CRIS profiles, and Runtime Messages recognises the
   // ID (403 entitlement, not the 400 an unknown ID gets). Not yet a 200.
   { modelId: 'anthropic.claude-haiku-5-5', verifiedAt: '2026-10-09' },
+  // Needs data retention aws_review; see above.
+  { modelId: 'anthropic.claude-fable-5', verifiedAt: '2026-11-03' },
+  { modelId: 'anthropic.claude-fable-5-1', verifiedAt: '2026-11-03' },
 ];
 
 const CLAUDE_MESSAGES_MODEL_IDS = new Set(
@@ -111,6 +128,24 @@ const CLAUDE_PROFILE_ENDPOINTS: readonly string[] = ['/v1/chat/completions', '/v
 export function getBedrockRuntimeCapabilities(model: string): BedrockRuntimeCapabilities | null {
   const baseModelId = getBedrockInferenceProfileBaseModelId(model);
   return baseModelId === null ? null : (CATALOG_BY_MODEL_ID.get(baseModelId) ?? null);
+}
+
+/**
+ * True when a Chat Completions request for a catalogued GPT profile must go to
+ * Runtime Responses: Runtime Chat Completions rejects function tools next to
+ * any reasoning effort but `none` (mnfst/llm-gateway#3107). "GPT" is
+ * `max_completion_tokens`, the same test the chat path uses for #3075, on
+ * purpose: both fixes cover exactly the same models.
+ */
+export function bedrockRuntimeChatNeedsResponses(
+  model: string,
+  body: Record<string, unknown>,
+): boolean {
+  const capabilities = getBedrockRuntimeCapabilities(model);
+  if (capabilities?.chatTokenParameter !== 'max_completion_tokens') return false;
+  if (!hasFunctionTools(body.tools)) return false;
+  if (capabilities.rejectsReasoningNone) return true;
+  return typeof body.reasoning_effort === 'string' && body.reasoning_effort !== 'none';
 }
 
 /**

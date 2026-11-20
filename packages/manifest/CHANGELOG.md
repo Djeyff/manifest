@@ -1,5 +1,30 @@
 # manifest
 
+## 6.29.1
+
+### Patch Changes
+
+- c973255: Keep tool call arguments for parallel tool calls on the ChatGPT subscription provider. The backend can send a call's arguments only on `response.function_call_arguments.done`, with no deltas, so Chat Completions and Messages clients got every call with empty arguments (#3118).
+- 7e81f40: Responses from the ChatGPT backend now include `completion_tokens_details.reasoning_tokens` in the usage, so clients see reasoning token counts for streaming and non-streaming requests.
+- 0c834ac: Gemini prompts rejected up front (`promptFeedback.blockReason`, no candidates) now return a `content_filter` finish reason with usage instead of an empty `choices` array or a bare `stop`.
+- e10162d: Request recordings are no longer deleted after a retention period on Manifest Cloud, for any plan. Self-hosted installs now keep them forever by default; set `REQUEST_RECORDING_RETENTION_DAYS` to delete older ones.
+
+## 6.29.0
+
+### Minor Changes
+
+- 8dec00d: Manifest Cloud is Pro only: a workspace without a subscription routes nothing and gets M204 "Subscription required". Self-hosted is unchanged.
+
+### Patch Changes
+
+- ac7c89e: Bedrock discovery now lists the Claude Fable 5 and 5.1 inference profiles. AWS only serves them when the Region's data retention mode is `aws_review` (or legacy `provider_data_share`), which retains prompts and completions for up to 30 days and lets AWS review them; otherwise Bedrock answers 400.
+- 9c87bbe: Serve Chat Completions requests with function tools and reasoning for Amazon Bedrock GPT cross-Region inference profiles through the Bedrock Runtime Responses API, which Runtime Chat Completions rejects for these models. Set `BEDROCK_RUNTIME_CHAT_VIA_RESPONSES=false` to turn it off. Sampling parameters (`temperature`, `top_p`, `stop`, `seed`, ...) are not forwarded on this route. Also read Responses stream events that carry their name only in `data.type`, and number streamed tool calls from 0 when a reasoning item comes first.
+
+  This numbering also applies to the other Responses-backed routes (OpenAI, Copilot, xAI, ChatGPT subscription and Bedrock Mantle): their streamed tool calls now start at index 0 when a reasoning item precedes them. GPT-6 Astra on Bedrock Runtime now serves Chat Completions requests with function tools instead of failing; without a `reasoning_effort` it runs at the model's default effort.
+
+- ac0d8bf: Bump `modelparams` to 0.0.72: GPT-6 (luna, astra, sol), GPT-6.1 sol and Claude Fable 5.1 parameter specs are now available in the bundled catalog, including offline and cold-boot installs. Also fixes the catalog loader, which could not read `modelparams` 0.0.58 or newer.
+- 394d9a9: Report Gemini replies blocked for BLOCKLIST, PROHIBITED_CONTENT, SPII or IMAGE_SAFETY as `content_filter` instead of `stop`.
+
 ## 6.28.11
 
 ### Patch Changes

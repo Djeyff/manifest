@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AgentMessage } from '../../entities/agent-message.entity';
 import { CustomProvider } from '../../entities/custom-provider.entity';
 import { ReasoningContentCacheEntry } from '../../entities/reasoning-content-cache-entry.entity';
+import { TenantProvider } from '../../entities/tenant-provider.entity';
 import { RoutingCoreModule } from '../routing-core/routing-core.module';
 import { ModelPricesModule } from '../../model-prices/model-prices.module';
 import { ModelDiscoveryModule } from '../../model-discovery/model-discovery.module';
@@ -14,6 +15,9 @@ import { CustomProviderModule } from '../custom-provider/custom-provider.module'
 import { HeaderTiersModule } from '../header-tiers/header-tiers.module';
 import { BillingModule } from '../../billing/billing.module';
 import { AutofixModule } from '../autofix/autofix.module';
+import { ZaiQuotaController } from '../zai-quota/zai-quota.controller';
+import { ZaiQuotaTextController } from '../zai-quota/zai-quota-text.controller';
+import { ZaiQuotaService } from '../zai-quota/zai-quota.service';
 import { ProxyController } from './proxy.controller';
 import { ProxyService } from './proxy.service';
 import { ProxyFallbackService } from './proxy-fallback.service';
@@ -30,10 +34,17 @@ import { CodexSessionAffinity } from './codex-session-affinity';
 import { ProxyExceptionFilter } from './proxy-exception.filter';
 import { AttemptRecordingService } from './attempt-recording.service';
 import { WalletBudgetService } from './wallet-budget.service';
+import { QuotaAccountingService } from './quota-accounting.service';
+import { QuotaAccountingController } from './quota-accounting.controller';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([AgentMessage, CustomProvider, ReasoningContentCacheEntry]),
+    TypeOrmModule.forFeature([
+      AgentMessage,
+      CustomProvider,
+      ReasoningContentCacheEntry,
+      TenantProvider,
+    ]),
     RoutingCoreModule,
     ModelPricesModule,
     ModelDiscoveryModule,
@@ -46,7 +57,7 @@ import { WalletBudgetService } from './wallet-budget.service';
     BillingModule,
     AutofixModule,
   ],
-  controllers: [ProxyController],
+  controllers: [ProxyController, QuotaAccountingController, ZaiQuotaController, ZaiQuotaTextController],
   providers: [
     ProxyService,
     ProxyFallbackService,
@@ -63,6 +74,8 @@ import { WalletBudgetService } from './wallet-budget.service';
     ProxyExceptionFilter,
     AttemptRecordingService,
     WalletBudgetService,
+    QuotaAccountingService,
+    ZaiQuotaService,
   ],
   exports: [ProviderClient],
 })

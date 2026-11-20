@@ -120,6 +120,8 @@ export interface ProviderErrorOpts extends HeaderTierRef {
   provider?: string;
   tier?: string;
   traceId?: string;
+  /** Caller session scope (`x-session-key`); persisted to agent_messages.session_key. */
+  sessionKey?: string | null;
   fallbackFromModel?: string;
   fallbackIndex?: number;
   authType?: string;
@@ -193,6 +195,16 @@ export interface ManifestBlockedRequestOpts {
    * requested model is still recorded in the model field.
    */
   routing?: ManifestBlockedRouting;
+  /**
+   * Route attribution for the reject (RET-599-FU). Door rejects (M201-M204)
+   * never contact a provider, but the tier the caller addressed resolves to a
+   * route — stamping it at write time keeps per-provider/per-connection
+   * accounting complete without post-hoc backfills. Stays NULL when nothing
+   * resolved (M101 with no providers configured, M302 with no model match).
+   */
+  provider?: string | null;
+  providerKeyLabel?: string | null;
+  tenantProviderId?: string | null;
 }
 
 export interface ManifestBlockedRouting {
@@ -221,6 +233,8 @@ export interface CancelledRequestOpts {
   attemptStart?: ProviderAttemptStart;
   requestDurationMs?: number;
   traceId?: string;
+  /** Caller session scope (`x-session-key`) for the cancelled rows. */
+  sessionKey?: string | null;
   /** API surface to retain when cancellation creates or repairs the Request. */
   apiMode?: ProxyApiMode;
 }
@@ -231,6 +245,8 @@ export interface FallbackSuccessOpts extends HeaderTierRef {
   attempt?: ProviderAttemptRef;
   requestDurationMs?: number;
   traceId?: string;
+  /** Caller session scope (`x-session-key`); persisted to the fallback-success rows. */
+  sessionKey?: string | null;
   provider?: string;
   fallbackFromModel?: string;
   fallbackIndex?: number;
@@ -310,6 +326,8 @@ export interface AutofixOriginalOpts extends HeaderTierRef {
   callerAttribution?: CallerAttribution | null;
   requestHeaders?: Record<string, string> | null;
   requestParams?: RequestParamDefaults | null;
+  /** Caller session scope (`x-session-key`) for the original-failure row. */
+  sessionKey?: string | null;
 }
 
 function buildMessageRow(
@@ -670,7 +688,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       opts.requestId,
       {
         trace_id: opts.traceId ?? null,
-        session_key: opts.sessionKey ?? null,
+        session_key: normalizeSessionKey(opts.sessionKey),
         timestamp: opts.timestamp,
         status: PENDING_STATUS,
         model: opts.requestedModel ?? null,
@@ -723,6 +741,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       duration_ms: opts.requestDurationMs ?? null,
       status: CANCELLED_STATUS,
       trace_id: opts.traceId ?? null,
+      session_key: normalizeSessionKey(opts.sessionKey),
       provider: opts.attemptStart?.provider ?? null,
       model: opts.attemptStart?.model ?? null,
       auth_type: opts.attemptStart?.authType ?? null,
@@ -807,6 +826,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       provider,
       tier,
       traceId,
+      sessionKey,
       fallbackFromModel,
       fallbackIndex,
       authType,
@@ -847,6 +867,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       request_id: requestId,
       ...attemptIdentity(attempt, attemptNumber),
       trace_id: traceId ?? null,
+      session_key: normalizeSessionKey(sessionKey),
       timestamp: new Date().toISOString(),
       duration_ms: requestDurationMs ?? null,
       status: messageStatus,
@@ -883,12 +904,14 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
    * (M100/M101), limits (M200/M204), rate limits (M201–M203), malformed requests
    * (M300), internal errors (M500), and expired keys (M004).
    *
-   * `provider` and `routing_tier` are deliberately left NULL — no provider was
-   * contacted and no tier was chosen. (The old canned-stub path wrote a
-   * placeholder `provider='manifest'` / `routing_tier='simple'`, which put a
-   * meaningless SIMPLE badge on setup errors and a phantom "manifest" entry in
-   * the Messages provider dropdown.) `model` keeps the model the caller asked
-   * for, which is real information.
+   * `routing_tier` is left NULL unless the reject carries routing context, and
+   * `provider`/`provider_key_label`/`tenant_provider_id` are stamped only from
+   * a resolved route (RET-599-FU): door rejects (M201-M204) attribute the tier
+   * route the caller addressed, post-routing rejects attribute the route that
+   * actually served. Never a placeholder `provider='manifest'` — that used to
+   * put a meaningless SIMPLE badge on setup errors and a phantom "manifest"
+   * entry in the Messages provider dropdown. `model` keeps the model the caller
+   * asked for, which is real information.
    */
   async recordManifestBlockedRequest(
     ctx: IngestionContext,
@@ -910,6 +933,9 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       attempt,
       apiMode,
       routing,
+      provider,
+      providerKeyLabel,
+      tenantProviderId,
     } = opts;
 
     const canonical = await this.customProviders.canonicalizeAgentMessageKeys(
@@ -921,7 +947,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
     const row = buildMessageRow(ctx, {
       request_id: requestId,
       trace_id: traceId ?? null,
-      session_key: sessionKey ?? null,
+      session_key: normalizeSessionKey(sessionKey),
       timestamp: new Date().toISOString(),
       duration_ms: durationMs ?? null,
       status: httpStatus === 429 ? 'rate_limited' : 'error',
@@ -930,15 +956,15 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       error_code: errorCode ?? null,
       error_http_status: httpStatus ?? null,
       model: canonical.model,
-      provider: null,
+      provider: provider ?? null,
       routing_tier: routing?.tier ?? null,
       routing_reason: reason,
       fallback_from_model: null,
       fallback_index: null,
       auth_type: null,
       specificity_category: routing?.specificityCategory ?? null,
-      provider_key_label: null,
-      tenant_provider_id: null,
+      provider_key_label: providerKeyLabel ?? null,
+      tenant_provider_id: tenantProviderId ?? null,
       caller_attribution: callerAttribution ?? null,
       request_headers: requestHeaders ?? null,
       request_params: null,
@@ -968,6 +994,8 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
     failures: FailedFallback[],
     opts?: {
       traceId?: string;
+      /** Caller session scope (`x-session-key`) for every failed-fallback hop row. */
+      sessionKey?: string | null;
       requestId?: string;
       firstAttemptNumber?: number;
       baseTimeMs?: number;
@@ -987,6 +1015,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
   ): Promise<void> {
     const {
       traceId,
+      sessionKey,
       requestId = uuid(),
       firstAttemptNumber,
       baseTimeMs,
@@ -1045,6 +1074,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
             firstAttemptNumber == null ? undefined : firstAttemptNumber + i,
           ),
           trace_id: traceId ?? null,
+          session_key: normalizeSessionKey(sessionKey),
           timestamp: ts,
           status,
           error_message: errorMessage,
@@ -1106,6 +1136,8 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       /** The route failed locally before provider transport started. */
       skipAttempt?: boolean;
       requestDurationMs?: number;
+      /** Caller session scope (`x-session-key`) for the failed-primary row. */
+      sessionKey?: string | null;
       reason?: string;
       tenantProviderId?: string | null;
       /** Label of that same connection, so the failed primary names the key it used. */
@@ -1142,6 +1174,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
     const row = buildMessageRow(ctx, {
       request_id: requestId,
       ...attemptIdentity(opts?.attempt, opts?.attemptNumber),
+      session_key: normalizeSessionKey(opts?.sessionKey),
       timestamp,
       duration_ms: opts?.requestDurationMs ?? null,
       status: 'fallback_error',
@@ -1198,6 +1231,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       attempt,
       requestDurationMs,
       traceId,
+      sessionKey,
       provider,
       fallbackFromModel,
       fallbackIndex,
@@ -1251,6 +1285,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       request_id: requestId,
       ...attemptIdentity(attempt, attemptNumber),
       trace_id: traceId ?? null,
+      session_key: normalizeSessionKey(sessionKey),
       timestamp: timestamp ?? new Date().toISOString(),
       duration_ms: requestDurationMs ?? null,
       status: 'ok',
@@ -1412,6 +1447,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       request_id: requestId,
       ...attemptIdentity(opts?.attempt, opts?.attemptNumber),
       trace_id: opts?.traceId ?? null,
+      session_key: normalizeSessionKey(opts?.sessionKey),
       timestamp: new Date(Date.now() - 1000).toISOString(),
       status: 'auto_fixed',
       // The full `{"error":{…}}` envelope, like every other error row — storing the

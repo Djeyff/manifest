@@ -18,6 +18,8 @@ import {
 import { createSsePayloadParser } from './sse-parser';
 import {
   classifyProviderError,
+  classifyUpstreamHint,
+  extractUpstreamCode,
   openAiErrorTypeForStatus,
   parseStructuredProviderError,
   sanitizeProviderError,
@@ -56,6 +58,8 @@ import {
   unwrapCodeAssistStreamPayload,
 } from '../oauth/gemini/codeassist-envelope';
 import type { AttemptRecordingCapture } from './attempt-recording-capture';
+import { parseQuotaHalt, type QuotaHaltWindow } from './quota-halt';
+import { notifyWindowFlush } from './quota-accounting';
 
 const logger = new Logger('ProxyResponseHandler');
 
@@ -119,6 +123,7 @@ function recordAutofixOriginalIfRetried(
   callerAttribution?: CallerAttribution | null,
   requestHeaders?: Record<string, string> | null,
   requestId?: string,
+  sessionKey?: string | null,
   route?: {
     model?: string;
     provider?: string;
@@ -137,6 +142,7 @@ function recordAutofixOriginalIfRetried(
       reason: meta.reason,
       authType: route?.authType ?? meta.auth_type,
       traceId,
+      sessionKey,
       callerAttribution,
       requestHeaders,
       requestParams: meta.request_params,
@@ -201,10 +207,12 @@ export function buildOpenAiCompatibleError(
     model?: string;
     apiMode?: ProxyApiMode;
     extra?: Record<string, unknown>;
+    retryAfterSeconds?: number | null;
   } = {},
 ): Record<string, unknown> {
   const classified = classifyProviderError(status, errorBody);
   const structured = parseStructuredProviderError(status, errorBody);
+  const upstreamHint = classifyUpstreamHint(status, errorBody);
   return {
     message:
       classified?.message ??
@@ -219,9 +227,19 @@ export function buildOpenAiCompatibleError(
           : 'api_error'
         : openAiErrorTypeForStatus(status)),
     param: structured?.param ?? null,
-    code: opts.code !== undefined ? opts.code : (classified?.code ?? structured?.code ?? null),
+    code:
+      opts.code !== undefined
+        ? opts.code
+        : (classified?.code ?? structured?.code ?? extractUpstreamCode(errorBody) ?? null),
     status,
     source: opts.source ?? classified?.source ?? 'provider',
+    // Stable per-code envelope (RET-590 / D-2026-11-07-03 item2): downstream
+    // automation keys on kind/hint/retryable (+ retry_after_seconds parity
+    // with the Retry-After header). Additive only - prior fields unchanged.
+    kind: upstreamHint?.kind ?? null,
+    hint: upstreamHint?.hint ?? null,
+    retryable: upstreamHint ? upstreamHint.retryable : null,
+    ...(opts.retryAfterSeconds != null ? { retry_after_seconds: opts.retryAfterSeconds } : {}),
     ...(opts.provider ? { provider: opts.provider } : {}),
     ...(opts.model ? { model: opts.model } : {}),
     ...(opts.extra ?? {}),
@@ -244,6 +262,7 @@ export async function handleProviderError(
   requestId: string = uuid(),
   requestDurationMs?: number,
   apiMode?: ProxyApiMode,
+  sessionKey?: string | null,
 ): Promise<void> {
   recordAutofixOriginalIfRetried(
     ctx,
@@ -254,6 +273,7 @@ export async function handleProviderError(
     callerAttribution,
     requestHeaders,
     requestId,
+    sessionKey,
   );
 
   if (failedFallbacks && failedFallbacks.length > 0 && !meta.fallbackFromModel) {
@@ -273,6 +293,7 @@ export async function handleProviderError(
       requestId,
       requestDurationMs,
       apiMode,
+      sessionKey,
     );
     return;
   }
@@ -288,6 +309,7 @@ export async function handleProviderError(
       provider: meta.provider,
       tier: meta.tier,
       traceId,
+      sessionKey,
       fallbackFromModel: meta.fallbackFromModel,
       fallbackIndex: meta.fallbackIndex,
       authType: meta.auth_type,
@@ -315,6 +337,12 @@ export async function handleProviderError(
   );
   res.status(errorStatus);
   setHeaders(res, metaHeaders);
+  // Quota-window 429s get an honest Retry-After (RET-480-B1); every other
+  // status/body keeps the response untouched. A parsed halt also adopts the
+  // window identity for quota accounting (RET-480-B2); notifyWindowFlush is
+  // guarded and can never break the error path.
+  const halt = setQuotaHaltRetryAfter(res, errorStatus, errorBody);
+  if (halt) notifyWindowFlush(meta.provider, halt.flushMs);
   const responseBody = {
     ...(apiMode === 'messages' ? { type: 'error' } : {}),
     error: buildOpenAiCompatibleError(errorStatus, errorBody, {
@@ -322,9 +350,28 @@ export async function handleProviderError(
       provider: meta.provider,
       model: meta.model,
       apiMode,
+      retryAfterSeconds: halt?.retryAfterSeconds ?? null,
     }),
   };
   res.json(responseBody);
+}
+
+/**
+ * Emit an honest `Retry-After` when the upstream 429 is a quota-window halt
+ * (RET-480-B1): the window comes from the body's `next_flush_time`, bounded to
+ * [1s, 1h]. Concurrency 429s and every other error keep the response untouched
+ * — no header. Returns the parsed halt so callers can adopt the window
+ * identity for quota accounting; null when the status/body is not a halt.
+ */
+export function setQuotaHaltRetryAfter(
+  res: ExpressResponse,
+  errorStatus: number,
+  errorBody: string,
+): QuotaHaltWindow | null {
+  const halt = parseQuotaHalt(errorStatus, errorBody, Date.now());
+  if (!halt) return null;
+  res.setHeader('Retry-After', String(halt.retryAfterSeconds));
+  return halt;
 }
 
 function handleFallbackExhausted(
@@ -343,6 +390,7 @@ function handleFallbackExhausted(
   requestId: string,
   requestDurationMs?: number,
   apiMode?: ProxyApiMode,
+  sessionKey?: string | null,
 ): void {
   const baseTime = Date.now();
   const primaryAttemptNumber = currentPrimaryAttemptNumber(autofix);
@@ -353,6 +401,7 @@ function handleFallbackExhausted(
       traceId,
       baseTimeMs: baseTime,
       markHandled: true,
+      sessionKey,
       lastAsError: true,
       authType: meta.auth_type,
       providerKeyLabel: meta.provider_key_label,
@@ -399,6 +448,7 @@ function handleFallbackExhausted(
         // the plain original failure carrying only Phoenix's audit.
         autofix,
         apiMode,
+        sessionKey,
       },
     ),
     'primary failure',
@@ -408,6 +458,10 @@ function handleFallbackExhausted(
   res.status(errorStatus);
   setHeaders(res, metaHeaders);
   res.setHeader('X-Manifest-Fallback-Exhausted', 'true');
+  // The exhaustion body is the PRIMARY provider's — source the halt window
+  // from it, same as the direct path (RET-480-B1).
+  const exhaustedHalt = setQuotaHaltRetryAfter(res, errorStatus, errorBody);
+  if (exhaustedHalt) notifyWindowFlush(meta.provider, exhaustedHalt.flushMs);
   const attempted = attemptedFallbackEntries(failedFallbacks, apiMode);
   const primaryAutofix = autofixSummary(autofix);
   // Every attempt reached a provider, so the error is provider-authored: the
@@ -505,6 +559,7 @@ export function recordFallbackFailures(
   requestHeaders?: Record<string, string> | null,
   autofix?: AutofixRecord,
   requestId: string = uuid(),
+  sessionKey?: string | null,
 ): string | undefined {
   if (!meta.fallbackFromModel) return undefined;
 
@@ -525,6 +580,7 @@ export function recordFallbackFailures(
     callerAttribution,
     requestHeaders,
     requestId,
+    sessionKey,
     {
       model: meta.fallbackFromModel,
       provider: meta.primaryProvider,
@@ -545,6 +601,7 @@ export function recordFallbackFailures(
         attemptNumber: primaryAttemptNumber,
         attempt: meta.primaryAttempt,
         skipAttempt: meta.primaryProviderCallStarted === false,
+        sessionKey,
         // Use the primary provider explicitly — meta.provider holds the
         // succeeding fallback's provider in this flow, not the primary's.
         provider: meta.primaryProvider,
@@ -583,6 +640,7 @@ export function recordFallbackFailures(
         firstAttemptNumber: primaryAttemptNumber + 1,
         baseTimeMs: fallbackBaseTime,
         markHandled: true,
+        sessionKey,
         authType: primaryAuthType,
         providerKeyLabel: meta.primaryKeyLabel ?? meta.provider_key_label,
         reason: meta.reason,
@@ -1014,6 +1072,7 @@ export function recordSuccess(
         // `autofix` is the primary's record (request-level status); the winning
         // fallback's own record is passed separately so only it can stamp the
         // fallback-success row.
+        sessionKey,
         autofix,
         fallbackAutofix,
         apiMode,
