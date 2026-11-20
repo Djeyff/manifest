@@ -339,14 +339,13 @@ const WALETTE_PALETTE_TOKENS = new Set([
 const HEX_COLOR = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
 
 /**
- * The wallet that owns the key which served the request, as a small colored
- * chip. `wallet_color` is either a palette token ('indigo') or a hex color
- * ('#4f46e5'); anything else falls back to a neutral chip.
+ * The wallet chip's span only — shared by the Wallet column cell and the
+ * Wallet filter's dropdown options so both render one identical chip.
+ * `color` is either a palette token ('indigo') or a hex color ('#4f46e5');
+ * anything else falls back to a neutral chip.
  */
-export function WalletCell(item: MessageRow): JSX.Element {
-  const name = item.wallet_name?.trim();
-  if (!name) return <td style={MONO_XS}>{'\u2014'}</td>;
-  const raw = item.wallet_color?.trim() ?? '';
+export function WalletChip(props: { name: string; color?: string | null }): JSX.Element {
+  const raw = props.color?.trim() ?? '';
   const token = WALETTE_PALETTE_TOKENS.has(raw) ? raw : null;
   const hex = HEX_COLOR.test(raw) ? raw : null;
   const cls = `tier-badge tier-badge--custom${token ? ` tier-color--${token}` : ''}`;
@@ -356,10 +355,22 @@ export function WalletCell(item: MessageRow): JSX.Element {
       ? undefined
       : { 'background-color': 'hsl(var(--muted) / 0.6)', color: 'hsl(var(--muted-foreground))' };
   return (
+    <span class={cls} style={style} title={props.name}>
+      {props.name}
+    </span>
+  );
+}
+
+/**
+ * The wallet that owns the key which served the request, as a small colored
+ * chip.
+ */
+export function WalletCell(item: MessageRow): JSX.Element {
+  const name = item.wallet_name?.trim();
+  if (!name) return <td style={MONO_XS}>{'\u2014'}</td>;
+  return (
     <td style="white-space: nowrap;">
-      <span class={cls} style={style} title={name}>
-        {name}
-      </span>
+      <WalletChip name={name} color={item.wallet_color} />
     </td>
   );
 }

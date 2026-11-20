@@ -136,6 +136,8 @@ export interface MessageListParams extends Record<string, string | undefined> {
   attempts?: string;
   /** Comma-separated model names (model filter). */
   model?: string;
+  /** Wallet id (Wallet filter) — the wallet of the key that served an attempt. */
+  wallet?: string;
   service_type?: string;
   cursor?: string;
   limit?: string;

@@ -39,11 +39,25 @@ function makeAttemptQb(rows: Array<{ model: string; provider?: string }> = []) {
   return qb;
 }
 
+/** The wallets-table scan builder behind the Wallet filter's options. */
+function makeWalletQb(rows: Array<{ id: string; name: string; color: string }> = []) {
+  const qb: Record<string, jest.Mock> = {
+    select: jest.fn(),
+    addSelect: jest.fn(),
+    where: jest.fn(),
+    orderBy: jest.fn(),
+    getRawMany: jest.fn().mockResolvedValue(rows),
+  };
+  for (const name of ['select', 'addSelect', 'where', 'orderBy']) qb[name].mockReturnValue(qb);
+  return qb;
+}
+
 function makeService(opts: {
   attemptModels?: string[];
   blockedRows?: Array<{ model: string }>;
   withRequestRepo?: boolean;
   requestQb?: ReturnType<typeof makeRequestQb>;
+  walletQb?: ReturnType<typeof makeWalletQb>;
 }) {
   const turnRepo = {
     query: jest.fn().mockImplementation((sql: string) => {
@@ -63,13 +77,20 @@ function makeService(opts: {
           ),
           query: jest.fn().mockResolvedValue([]),
         };
+  const walletRepo = opts.walletQb
+    ? { createQueryBuilder: jest.fn(() => opts.walletQb) }
+    : undefined;
   const service = new MessagesQueryService(
     mockScopeResolver(requestRepo?.query),
     turnRepo as never,
     { find: jest.fn().mockResolvedValue([]) } as never,
     requestRepo as never,
+    undefined,
+    undefined,
+    undefined,
+    walletRepo as never,
   );
-  return { service, turnRepo, requestRepo };
+  return { service, turnRepo, requestRepo, walletRepo };
 }
 
 describe('MessagesQueryService filter options', () => {
@@ -195,5 +216,43 @@ describe('MessagesQueryService filter options', () => {
     const options = await service.getMessageFilterOptions({ tenantId: 'tenant-1', range: '24h' });
 
     expect(options.models).toEqual(['gpt-4o']);
+  });
+
+  it('offers the tenant wallets as Wallet filter options (RET-697)', async () => {
+    const walletQb = makeWalletQb([
+      { id: 'w-main', name: 'MAIN', color: 'emerald' },
+      { id: 'w-archive', name: 'ARCHIVE', color: '#123abc' },
+    ]);
+    const { service, walletRepo } = makeService({ attemptModels: [], walletQb });
+
+    const options = await service.getMessageFilterOptions({ tenantId: 'tenant-1', range: '24h' });
+
+    expect(options.wallets).toEqual([
+      { id: 'w-main', name: 'MAIN', color: 'emerald' },
+      { id: 'w-archive', name: 'ARCHIVE', color: '#123abc' },
+    ]);
+    expect(walletRepo!.createQueryBuilder).toHaveBeenCalledTimes(1);
+    expect(walletQb.where).toHaveBeenCalledWith('w.tenant_id = :tenantId', {
+      tenantId: 'tenant-1',
+    });
+  });
+
+  it('falls back to the entity default color for a wallet row with an empty tag', async () => {
+    const walletQb = makeWalletQb([{ id: 'w-bare', name: 'BARE', color: '   ' }]);
+    const { service } = makeService({ attemptModels: [], walletQb });
+
+    const options = await service.getMessageFilterOptions({ tenantId: 'tenant-1', range: '24h' });
+
+    expect(options.wallets).toEqual([{ id: 'w-bare', name: 'BARE', color: 'indigo' }]);
+  });
+
+  it('skips the wallets lookup for a caller with no tenant', async () => {
+    const walletQb = makeWalletQb([{ id: 'w-x', name: 'X', color: 'indigo' }]);
+    const { service } = makeService({ attemptModels: [], walletQb });
+
+    const options = await service.getMessageFilterOptions({ tenantId: null });
+
+    expect(options.wallets).toEqual([]);
+    expect(walletQb.getRawMany).not.toHaveBeenCalled();
   });
 });

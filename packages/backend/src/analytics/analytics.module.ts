@@ -13,6 +13,7 @@ import { TierAssignment } from '../entities/tier-assignment.entity';
 import { SpecificityAssignment } from '../entities/specificity-assignment.entity';
 import { HeaderTier } from '../entities/header-tier.entity';
 import { AgentModelParams } from '../entities/agent-model-params.entity';
+import { Wallet } from '../entities/wallet.entity';
 import { OtlpModule } from '../otlp/otlp.module';
 import { RoutingCoreModule } from '../routing/routing-core/routing-core.module';
 import { ModelPricesModule } from '../model-prices/model-prices.module';
@@ -60,6 +61,7 @@ import { AgentUsageDailyService } from './services/agent-usage-daily.service';
       SpecificityAssignment,
       HeaderTier,
       AgentModelParams,
+      Wallet,
     ]),
     OtlpModule,
     RoutingCoreModule,

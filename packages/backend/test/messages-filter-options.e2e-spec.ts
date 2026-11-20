@@ -26,6 +26,12 @@ const ALPHA_MESSAGE = 'msg-alpha-premium';
 const BETA_MESSAGE = 'msg-beta-premium';
 const UNTIERED_MESSAGE = 'msg-untiered';
 
+// RET-697: wallets of the caller's tenant plus one of ANOTHER tenant — the
+// Wallet filter's options must list only the former.
+const WALLET_MAIN_ID = 'wallet-options-main';
+const WALLET_ARCHIVE_ID = 'wallet-options-archive';
+const OTHER_WALLET_ID = 'wallet-options-secret';
+
 interface TierOption {
   name: string;
   ids: string[];
@@ -99,9 +105,21 @@ beforeAll(async () => {
   await insertMessage(ALPHA_MESSAGE, TEST_AGENT_ID, 'test-agent', ALPHA_PREMIUM, now);
   await insertMessage(BETA_MESSAGE, SECOND_AGENT_ID, 'second-agent', BETA_PREMIUM, now);
   await insertMessage(UNTIERED_MESSAGE, TEST_AGENT_ID, 'test-agent', null, now);
+
+  await ds.query(
+    `INSERT INTO wallets (id, tenant_id, name, color, created_at, updated_at)
+     VALUES ($1,$4,'MAIN','emerald',$6,$6), ($2,$4,'ARCHIVE','#123abc',$6,$6), ($3,$5,'Secret Stash','rose',$6,$6)`,
+    [WALLET_MAIN_ID, WALLET_ARCHIVE_ID, OTHER_WALLET_ID, TEST_TENANT_ID, OTHER_TENANT_ID, now],
+  );
 });
 
 afterAll(async () => {
+  const ds = app?.get(DataSource);
+  await ds?.query('DELETE FROM wallets WHERE id IN ($1, $2, $3)', [
+    WALLET_MAIN_ID,
+    WALLET_ARCHIVE_ID,
+    OTHER_WALLET_ID,
+  ]);
   await app?.close();
 });
 
@@ -164,5 +182,44 @@ describe('GET /api/v1/messages — custom tier filter', () => {
     const ids: string[] = res.body.items.map((it: { id: string }) => it.id);
     expect(ids).toContain(ALPHA_MESSAGE);
     expect(ids).not.toContain(BETA_MESSAGE);
+  });
+});
+
+describe('GET /api/v1/messages/filter-options — wallets (RET-697)', () => {
+  it('offers the caller tenant wallets with their color tags', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/api/v1/messages/filter-options?range=24h')
+      .set('x-api-key', TEST_API_KEY)
+      .expect(200);
+
+    expect(res.body.wallets).toEqual(
+      expect.arrayContaining([
+        { id: WALLET_MAIN_ID, name: 'MAIN', color: 'emerald' },
+        { id: WALLET_ARCHIVE_ID, name: 'ARCHIVE', color: '#123abc' },
+      ]),
+    );
+  });
+
+  it('never offers another tenant wallets', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/api/v1/messages/filter-options?range=24h')
+      .set('x-api-key', TEST_API_KEY)
+      .expect(200);
+
+    const wallets: Array<{ id: string; name: string }> = res.body.wallets;
+    expect(wallets.map((w) => w.name)).not.toContain('Secret Stash');
+    expect(wallets.map((w) => w.id)).not.toContain(OTHER_WALLET_ID);
+  });
+
+  it('keeps listing wallets with a harness selected (they serve every harness)', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/api/v1/messages/filter-options?range=24h&agent_name=second-agent')
+      .set('x-api-key', TEST_API_KEY)
+      .expect(200);
+
+    const wallets: Array<{ id: string; name: string }> = res.body.wallets;
+    expect(wallets.map((w) => w.id)).toEqual(
+      expect.arrayContaining([WALLET_MAIN_ID, WALLET_ARCHIVE_ID]),
+    );
   });
 });

@@ -20,7 +20,7 @@ import MultiSelect, { type MultiSelectOption } from '../components/MultiSelect.j
 import { getProviders as getProviderConnections } from '../services/api/providers.js';
 import SetupModal from '../components/SetupModal.jsx';
 import { buildRequestColumns, type MessageRow } from '../components/message-table-types.js';
-import { AutofixIcon, FallbackIcon } from '../components/message-table-cells.jsx';
+import { AutofixIcon, FallbackIcon, WalletChip } from '../components/message-table-cells.jsx';
 import { agentDisplayName } from '../services/agent-display-name.js';
 import { agentPlatform, agentCategory } from '../services/agent-platform-store.js';
 import {
@@ -60,10 +60,20 @@ interface HeaderTierFilterOption {
   ids: string[];
 }
 
+interface WalletFilterOption {
+  id: string;
+  /** Owner-editable wallet name, e.g. "MAIN". */
+  name: string;
+  /** Chip color: a palette token ('indigo') or a hex color ('#4f46e5'). */
+  color: string;
+}
+
 interface MessageFilterOptionsData {
   providers: string[];
   provider_labels?: Record<string, string>;
   header_tiers?: HeaderTierFilterOption[];
+  /** The tenant's wallets — the Wallet filter's options. */
+  wallets?: WalletFilterOption[];
   /** Every model this tenant has used in range — the Model filter's options. */
   models?: string[];
 }
@@ -134,6 +144,7 @@ const MessageLog: Component = () => {
     trigger?: string;
     attempts?: string;
     model?: string;
+    wallet?: string;
     range?: string;
   }>();
   const navigate = useNavigate();
@@ -288,6 +299,23 @@ const MessageLog: Component = () => {
     setModelsFilterValue(values);
     setSearchParams({ model: values.length ? values.join(',') : undefined }, { replace: true });
   };
+  // `?wallet=` narrows the log to requests an attempt of which was served by a
+  // key of this wallet — the wallet_members join behind the Wallet column.
+  const [walletFilter, setWalletFilterValue] = createSignal(
+    typeof searchParams.wallet === 'string' ? searchParams.wallet : '',
+  );
+  const setWalletFilter = (value: string) => {
+    const next = value || '';
+    setWalletFilterValue(next);
+    setSearchParams({ wallet: next || undefined }, { replace: true });
+  };
+  createEffect(
+    on(
+      () => searchParams.wallet,
+      (wallet: unknown) => setWalletFilterValue(typeof wallet === 'string' ? wallet : ''),
+      { defer: true },
+    ),
+  );
   // `?range=` scopes the log to a rolling window; deep links from dashboard
   // cards carry it so the list total can match the card that sent us here.
   const [rangeFilter, setRangeFilterValue] = createSignal<MessageRangeFilterValue>(
@@ -368,6 +396,7 @@ const MessageLog: Component = () => {
         triggerFilter,
         attemptStatusFilter,
         modelsFilter,
+        walletFilter,
         tierFilter,
         originFilter,
         statusFilterValue,
@@ -390,6 +419,8 @@ const MessageLog: Component = () => {
     if (attempts) q.attempts = attempts;
     const models = modelsFilter();
     if (models.length) q.model = models.join(',');
+    const wallet = walletFilter();
+    if (wallet) q.wallet = wallet;
     const tier = tierFilter();
     if (tier) {
       if (tier.startsWith(SPECIFICITY_FILTER_PREFIX)) {
@@ -478,6 +509,27 @@ const MessageLog: Component = () => {
     return merged.map((model) => ({ value: model, label: getModelDisplayName(model) }));
   });
 
+  // The tenant's wallets, chip-rendered the same way the Wallet column does it.
+  // A wallet deep-linked via `?wallet=` stays selectable even while the options
+  // request is in flight (or if its row was deleted since) — the Select must
+  // always offer the active value; its chip falls back to neutral colors.
+  const missingWalletOptions = createMemo<WalletFilterOption[]>(() => {
+    const active = walletFilter();
+    if (!active) return [];
+    const known = messageFilterOptions()?.wallets ?? [];
+    return known.some((wallet) => wallet.id === active)
+      ? []
+      : [{ id: active, name: active, color: '' }];
+  });
+  const walletOptions = createMemo(() => [
+    { label: 'All wallets', value: '' },
+    ...[...(messageFilterOptions()?.wallets ?? []), ...missingWalletOptions()].map((wallet) => ({
+      label: wallet.name,
+      value: wallet.id,
+      icon: <WalletChip name={wallet.name} color={wallet.color} />,
+    })),
+  ]);
+
   const displayedItems = createMemo<MessageRow[]>(() => {
     return data()?.items ?? [];
   });
@@ -497,6 +549,7 @@ const MessageLog: Component = () => {
     triggerFilter() !== '' ||
     attemptStatusFilter() !== '' ||
     modelsFilter().length > 0 ||
+    walletFilter() !== '' ||
     tierFilter() !== '' ||
     originFilter() !== '' ||
     statusFilterValue() !== '' ||
@@ -531,6 +584,7 @@ const MessageLog: Component = () => {
     setTriggerFilterValue('');
     setAttemptStatusFilter('');
     setModelsFilter([]);
+    setWalletFilterValue('');
     setTierFilter('');
     setOriginFilter('');
     setStatusFilter('');
@@ -752,6 +806,12 @@ const MessageLog: Component = () => {
                 options={agentFilterOptions()}
               />
             </Show>
+            <Select
+              value={walletFilter()}
+              onChange={setWalletFilter}
+              options={walletOptions()}
+              label="Wallet filter"
+            />
             <MultiSelect
               values={connectionsFilter()}
               onChange={setConnectionsFilter}
