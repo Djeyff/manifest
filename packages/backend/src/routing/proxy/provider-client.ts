@@ -2,12 +2,7 @@ import { createHash } from 'crypto';
 import { HttpStatus, Injectable, Logger, Optional } from '@nestjs/common';
 import { OPENAI_RESPONSES_ONLY_RE, stripVendorPrefix } from '../../common/constants/openai-models';
 import { XAI_RESPONSES_ONLY_RE } from '../../common/constants/xai-models';
-import {
-  PROVIDER_ENDPOINTS,
-  ProviderEndpoint,
-  resolveBedrockEndpointKey,
-  resolveEndpointKey,
-} from './provider-endpoints';
+import { PROVIDER_ENDPOINTS, ProviderEndpoint, buildEndpointOverride, resolveBedrockEndpointKey, resolveEndpointKey } from './provider-endpoints';
 import { validatePublicUrl } from '../../common/utils/url-validation';
 import { isSelfHosted } from '../../common/utils/detect-self-hosted';
 import { resolveSubscriptionEndpointKey } from './provider-hooks';
@@ -50,7 +45,10 @@ import { isProviderAvailableForDeployment } from '../../common/utils/provider-av
 import { ManifestError } from '../../common/errors/manifest-error';
 import { MANAGED_FREE_PROVIDER_BY_ID } from '../../common/constants/managed-free-providers';
 import { isBedrockProvider } from '../bedrock-region';
-import { getBedrockRuntimeCapabilities } from '../bedrock-runtime-capabilities';
+import {
+  bedrockRuntimeChatNeedsResponses,
+  getBedrockRuntimeCapabilities,
+} from '../bedrock-runtime-capabilities';
 import { QuotaAccountingService } from './quota-accounting.service';
 
 export interface ForwardResult {
@@ -404,6 +402,7 @@ export class ProviderClient {
       authType,
       model,
       opts.apiMode,
+      body,
     );
     const isGoogle = endpoint.format === 'google';
     const isAnthropic = endpoint.format === 'anthropic';
@@ -563,9 +562,25 @@ export class ProviderClient {
     authType: string | undefined,
     model: string,
     apiMode: ForwardOptions['apiMode'],
+    body: Record<string, unknown>,
   ): Promise<{ endpoint: ProviderEndpoint; endpointKey: string }> {
+    // Runtime Chat Completions rejects function tools next to reasoning on GPT
+    // profiles, so those chat requests go to Runtime Responses instead
+    // (mnfst/llm-gateway#3107). `BEDROCK_RUNTIME_CHAT_VIA_RESPONSES=false` turns it off.
+    const viaResponses =
+      isBedrockProvider(provider) &&
+      (apiMode === undefined || apiMode === 'chat_completions') &&
+      process.env.BEDROCK_RUNTIME_CHAT_VIA_RESPONSES !== 'false' &&
+      bedrockRuntimeChatNeedsResponses(model, body);
     if (customEndpoint) {
-      return { endpoint: customEndpoint, endpointKey: 'custom' };
+      // A stored-region connection arrives as the Runtime chat override.
+      return {
+        endpoint:
+          viaResponses && customEndpoint.format === 'openai'
+            ? buildEndpointOverride(customEndpoint.baseUrl, 'bedrock-runtime-responses')
+            : customEndpoint,
+        endpointKey: 'custom',
+      };
     }
     let resolved = resolveEndpointKey(provider);
     if (!resolved) {
@@ -576,7 +591,7 @@ export class ProviderClient {
       if (override) resolved = override;
     }
     if (resolved === 'bedrock') {
-      resolved = resolveBedrockEndpointKey(model, apiMode);
+      resolved = resolveBedrockEndpointKey(model, viaResponses ? 'responses' : apiMode);
     }
     if (resolved === 'qwen-subscription') {
       const bareQwenModel = stripVendorPrefix(model);
@@ -883,10 +898,12 @@ export class ProviderClient {
                 endpointKey === 'openai-subscription' ||
                 endpointKey === 'openai-responses' ||
                 endpointKey === 'xai-responses',
-              // Only OpenAI infrastructure is known to accept
-              // reasoning.summary; other Responses backends may 400 on it.
+              // Only OpenAI infrastructure and Bedrock Runtime are known to
+              // accept reasoning.summary; other Responses backends may 400 on it.
               mapReasoningEffort:
-                endpointKey === 'openai-subscription' || endpointKey === 'openai-responses',
+                endpointKey === 'openai-subscription' ||
+                endpointKey === 'openai-responses' ||
+                endpoint.acceptsReasoningSummary,
             });
       if (endpointKey === 'xai-responses' || endpoint.acceptsPromptCacheKey) {
         applyHashedPromptCacheKey(requestBody, ctx.providerCacheKey);

@@ -920,10 +920,15 @@ export class ProxyFallbackService {
     // window flush and NEVER cools the shared route — other keys on the route
     // and the funded fallback stay live, and the key auto-revives at the
     // window reset. Transient 429s keep the route-cooldown treatment below.
-    const body = await response
-      .clone()
-      .text()
-      .catch(() => null);
+    // A quota halt can only exist on a 429 (parseQuotaHalt ignores other
+    // statuses), so non-429 responses skip the body probe entirely: probing
+    // awaited the response's full stream, which hung the hop on a 200 SSE
+    // that never sends a byte — before warm-up could fail it to the next
+    // fallback route (caught by the stalled-stream specs).
+    const body =
+      response.status === 429
+        ? await response.clone().text().catch(() => null)
+        : null;
     const halt = body === null ? null : parseQuotaHalt(response.status, body, Date.now());
     if (halt) {
       this.keyQuotaHalts.halt(this.keyHaltRef(opts, opts.apiKey), halt.flushMs);

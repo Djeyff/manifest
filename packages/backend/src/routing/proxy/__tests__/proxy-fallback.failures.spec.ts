@@ -485,7 +485,13 @@ describe('ProxyFallbackService.tryFallbacks — failure chain by status code', (
     // Drive one real 429 carrying the given JSON body (plus an ordinary
     // Retry-After header), then read the stored cooldown expiry — same
     // measurement shape as the Retry-After TTL describe above.
-    const recordHaltCooldownTtl = async (responseBody: string): Promise<number> => {
+    const recordHalt429 = async (
+      responseBody: string,
+    ): Promise<{
+      before: number;
+      routeCooldowns: Map<string, number>;
+      haltUntil: number | null;
+    }> => {
       providerClient.forward.mockResolvedValueOnce({
         response: new Response(responseBody, {
           status: 429,
@@ -505,35 +511,64 @@ describe('ProxyFallbackService.tryFallbacks — failure chain by status code', (
         stream: false,
         sessionKey: 'sess-1',
         agentId: 'agent-1',
+        tenantId: 'tenant-1',
         providerKeyLabel: 'Claude Code',
         authType: 'subscription',
       });
 
       const cooldowns = (service as unknown as { rateLimitCooldowns: Map<string, number> })
         .rateLimitCooldowns;
-      expect(cooldowns.size).toBe(1);
-      const [expiresAt] = [...cooldowns.values()];
-      return expiresAt - before;
+      const halts = (
+        service as unknown as {
+          keyQuotaHalts: { haltedUntil(ref: Record<string, unknown>): number | null };
+        }
+      ).keyQuotaHalts;
+      return {
+        before,
+        routeCooldowns: cooldowns,
+        haltUntil: halts.haltedUntil({
+          tenantId: 'tenant-1',
+          provider: 'anthropic',
+          authType: 'subscription',
+          keyLabel: 'Claude Code',
+          model: 'claude-sonnet-4-6',
+          secret: 'sk-anthropic-test',
+        }),
+      };
     };
 
-    it('adopts the halt window for the route cooldown, bypassing the 5-minute cap', async () => {
+
+    it('halts the drained key for the full window, bypassing the 5-minute cap', async () => {
       const halt = JSON.stringify({
         error: { code: 1316, next_flush_time: Date.now() + 40 * 60_000 },
       });
-      const ttl = await recordHaltCooldownTtl(halt);
-      // ~40 minutes — far beyond the plain-429 5-minute ceiling.
-      expect(ttl).toBeGreaterThan(39 * 60_000);
-      expect(ttl).toBeLessThanOrEqual(40 * 60_000);
+      const { before, routeCooldowns, haltUntil } = await recordHalt429(halt);
+      // RET-647 (D-2026-11-10-13) superseded the RET-480-B1 route cooldown: a
+      // quota-window halt proves only THIS credential is drained, so the halt
+      // is key-scoped and the shared route cooldown is deliberately left empty
+      // (other keys and funded fallbacks stay live). The window adoption
+      // itself is kept: the key auto-revives exactly at the provider's window
+      // flush — ~40 minutes here, far beyond the plain-429 5-minute ceiling.
+      expect(routeCooldowns.size).toBe(0);
+      expect(haltUntil).not.toBeNull();
+      expect(haltUntil! - before).toBeGreaterThan(39 * 60_000);
+      expect(haltUntil! - before).toBeLessThanOrEqual(40 * 60_000);
     });
 
     it('keeps the plain-429 treatment when a halt code carries no usable window', async () => {
       // Halt code 1316 without next_flush_time: no honest window to adopt, so
-      // the cooldown falls back to the header path — the helper's 30s
-      // Retry-After header, not any synthesized window.
+      // nothing is key-halted and the cooldown falls back to the header path —
+      // the helper's 30s Retry-After header, not any synthesized window. The
+      // upper bound carries 1s of slack for the wall-clock crossing between
+      // sampling `before` and the service writing the cooldown expiry (the old
+      // exact 30_000 cap flaked by 1ms under load).
       const haltWithoutWindow = JSON.stringify({ error: { code: 1316 } });
-      const ttl = await recordHaltCooldownTtl(haltWithoutWindow);
-      expect(ttl).toBeGreaterThan(29_000);
-      expect(ttl).toBeLessThanOrEqual(30_000);
+      const { before, routeCooldowns, haltUntil } = await recordHalt429(haltWithoutWindow);
+      expect(haltUntil).toBeNull();
+      expect(routeCooldowns.size).toBe(1);
+      const [expiresAt] = [...routeCooldowns.values()];
+      expect(expiresAt - before).toBeGreaterThan(29_000);
+      expect(expiresAt - before).toBeLessThanOrEqual(31_000);
     });
   });
 
