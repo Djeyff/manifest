@@ -1,4 +1,8 @@
-import { resolveRouteCredentials, type RouteCredentialDeps, type ResolvedRouteCredentials } from './route-credentials';
+import {
+  resolveRouteCredentials,
+  type RouteCredentialDeps,
+  type ResolvedRouteCredentials,
+} from './route-credentials';
 import {
   evaluateWalletBudget,
   parseWalletBudget,
@@ -151,12 +155,16 @@ function args(overrides: Record<string, unknown> = {}): Record<string, unknown> 
   };
 }
 
-function expectServed(value: ResolvedRouteCredentials): Extract<ResolvedRouteCredentials, { ok: true }> {
+function expectServed(
+  value: ResolvedRouteCredentials,
+): Extract<ResolvedRouteCredentials, { ok: true }> {
   if (!value.ok) throw new Error(`expected admission, got ${value.reason}`);
   return value;
 }
 
-function expectBlocked(value: ResolvedRouteCredentials): Extract<ResolvedRouteCredentials, { ok: false }> {
+function expectBlocked(
+  value: ResolvedRouteCredentials,
+): Extract<ResolvedRouteCredentials, { ok: false }> {
   if (value.ok) throw new Error('expected a door rejection');
   return value;
 }
@@ -317,7 +325,10 @@ describe('resolveRouteCredentials — WALLET-granularity budgets (RET-692-FU1)',
 
 describe('WalletBudgetService — wallet-level spend aggregation', () => {
   /** Minimal DataSource double: answers the wallet lookup and the spend rollup. */
-  function fakeDataSource(walletRows: unknown[], spendRows: unknown[]): {
+  function fakeDataSource(
+    walletRows: unknown[],
+    spendRows: unknown[],
+  ): {
     query: jest.Mock;
   } {
     return {
@@ -429,5 +440,55 @@ describe('WalletBudgetService — wallet-level spend aggregation', () => {
       member_key_ids: ['k1', 'k2'],
       governs: true,
     });
+  });
+});
+
+describe('WalletBudgetService — RET-695 final-day drain wiring', () => {
+  const drainDataSource = (spendRows: unknown[]) => ({
+    query: jest.fn(async (sql: string) => {
+      if (sql.includes('"wallet_members"')) return [];
+      if (sql.includes('"agent_messages"')) return spendRows;
+      return [];
+    }),
+  });
+
+  const DRAIN_CONFIG = { daily_usd: 10, weekly_usd: 60, week_anchor_utc: '00:00' };
+  /** Sunday 2026-11-22T23:00Z — 1h before the Monday 00:00Z reset (final day). */
+  const DRAIN_DAY = new Date('2026-11-22T23:00:00.000Z');
+  const ENV = 'MANIFEST_WALLET_FINAL_DAY_DRAIN';
+
+  it('(d1) default ON: on the final day the drain opens the daily stop — day past the 10 line serves while the pool has room', async () => {
+    delete process.env[ENV];
+    const service = new WalletBudgetService(
+      drainDataSource([{ day_usd: '15', week_usd: '30' }]) as never,
+      {} as never,
+    );
+
+    const { decision } = await service.decide(DRAIN_CONFIG, 'k9', { agentName: 'a' }, DRAIN_DAY);
+
+    expect(decision).toEqual({ allowed: true });
+  });
+
+  it('(d2) MANIFEST_WALLET_FINAL_DAY_DRAIN=0 kills the drain — the plain daily cap returns', async () => {
+    const prev = process.env[ENV];
+    process.env[ENV] = '0';
+    try {
+      const service = new WalletBudgetService(
+        drainDataSource([{ day_usd: '15', week_usd: '30' }]) as never,
+        {} as never,
+      );
+
+      const { decision } = await service.decide(DRAIN_CONFIG, 'k9', { agentName: 'a' }, DRAIN_DAY);
+
+      expect(decision.allowed).toBe(false);
+      if (!decision.allowed) {
+        expect(decision.rule).toBe('daily_cap');
+        expect(decision.detail).toContain('daily line 10.00 USD');
+        expect(decision.drain).toBeUndefined();
+      }
+    } finally {
+      if (prev === undefined) delete process.env[ENV];
+      else process.env[ENV] = prev;
+    }
   });
 });

@@ -3,15 +3,20 @@ import {
   dayWindowStart,
   evaluateWalletBudget,
   inNightWindow,
+  isFinalDayBeforeWeeklyReset,
   isOwnerAnswerTrigger,
+  nextWeeklyReset,
   orderCandidates,
   parseWalletBudget,
   resolveWalletBudgetMode,
+  resolveWalletFinalDayDrain,
   triggerHeaderValue,
   walletBudgetMessage,
   weekWindowStart,
+  WALLET_FINAL_DAY_DRAIN_ENV,
   WALLET_NIGHT_WINDOW_DEFAULT,
   type WalletBudgetConfig,
+  type WalletBudgetDecision,
   type WalletGateCallerContext,
 } from './wallet-budget';
 
@@ -163,13 +168,13 @@ describe('callerIsAllowlisted', () => {
   });
 
   it('admits the owner-answer pseudo-entry only with an owner trigger header', () => {
-    expect(
-      callerIsAllowlisted(allow, { agentName: 'architect', triggerHeader: 'owner-157' }),
-    ).toBe(true);
-    expect(callerIsAllowlisted(allow, { agentName: 'architect' })).toBe(false);
-    expect(callerIsAllowlisted(allow, { agentName: 'architect', triggerHeader: 'cron-digest' })).toBe(
-      false,
+    expect(callerIsAllowlisted(allow, { agentName: 'architect', triggerHeader: 'owner-157' })).toBe(
+      true,
     );
+    expect(callerIsAllowlisted(allow, { agentName: 'architect' })).toBe(false);
+    expect(
+      callerIsAllowlisted(allow, { agentName: 'architect', triggerHeader: 'cron-digest' }),
+    ).toBe(false);
   });
 
   it('never matches unknown callers', () => {
@@ -231,8 +236,12 @@ describe('evaluateWalletBudget', () => {
 
   it('admits allowlisted and owner-answer callers inside the night window', () => {
     expect(
-      evaluateWalletBudget(config, { day_usd: 1, week_usd: 2 }, { tierName: 'KaanAssistV2' }, INSIDE)
-        .allowed,
+      evaluateWalletBudget(
+        config,
+        { day_usd: 1, week_usd: 2 },
+        { tierName: 'KaanAssistV2' },
+        INSIDE,
+      ).allowed,
     ).toBe(true);
     expect(
       evaluateWalletBudget(
@@ -256,8 +265,12 @@ describe('evaluateWalletBudget', () => {
 
   it('admits under-line spend outside the window', () => {
     expect(
-      evaluateWalletBudget(config, { day_usd: 11.99, week_usd: 20 }, { agentName: 'architect' }, DAY)
-        .allowed,
+      evaluateWalletBudget(
+        config,
+        { day_usd: 11.99, week_usd: 20 },
+        { agentName: 'architect' },
+        DAY,
+      ).allowed,
     ).toBe(true);
   });
 });
@@ -298,12 +311,10 @@ describe('walletBudgetMessage', () => {
 
   it('names the wallet, rule, and spend vs line for the caps', () => {
     expect(
-      walletBudgetMessage(
-        'main',
-        { allowed: false, rule: 'daily_cap', detail: 'x' },
-        config,
-        { day_usd: 12, week_usd: 20 },
-      ),
+      walletBudgetMessage('main', { allowed: false, rule: 'daily_cap', detail: 'x' }, config, {
+        day_usd: 12,
+        week_usd: 20,
+      }),
     ).toEqual({
       metric: 'main wallet daily cap',
       used: '12.00 USD',
@@ -311,12 +322,10 @@ describe('walletBudgetMessage', () => {
       period: 'today (SDQ)',
     });
     expect(
-      walletBudgetMessage(
-        'main',
-        { allowed: false, rule: 'weekly_cap', detail: 'x' },
-        config,
-        { day_usd: 1, week_usd: 60 },
-      ),
+      walletBudgetMessage('main', { allowed: false, rule: 'weekly_cap', detail: 'x' }, config, {
+        day_usd: 1,
+        week_usd: 60,
+      }),
     ).toEqual({
       metric: 'main wallet weekly cap',
       used: '60.00 USD',
@@ -327,12 +336,10 @@ describe('walletBudgetMessage', () => {
 
   it('names the window for night-window blocks', () => {
     expect(
-      walletBudgetMessage(
-        'main',
-        { allowed: false, rule: 'night_window', detail: 'x' },
-        config,
-        { day_usd: 1, week_usd: 2 },
-      ),
+      walletBudgetMessage('main', { allowed: false, rule: 'night_window', detail: 'x' }, config, {
+        day_usd: 1,
+        week_usd: 2,
+      }),
     ).toEqual({
       metric: 'main wallet night window',
       used: 'blocked',
@@ -350,5 +357,166 @@ describe('WalletGateCallerContext typing smoke', () => {
       triggerHeader: 'owner-1',
     };
     expect(callerIsAllowlisted(['architect'], caller)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RET-695 final-day drain rule (owner rule: unused budget rolls over)
+// ---------------------------------------------------------------------------
+
+/** Monday-anchored week: reset Monday 2026-11-23T00:00:00Z. */
+const DRAIN_CONFIG: WalletBudgetConfig = {
+  daily_usd: 10,
+  weekly_usd: 60,
+  week_anchor_utc: '00:00',
+};
+/** Sunday 2026-11-22T23:00Z — 1h before the Monday 00:00Z reset (final day). */
+const FINAL_HOUR = new Date('2026-11-22T23:00:00.000Z');
+/** Saturday 2026-11-21T14:00Z — ~34h before the reset (NOT the final day). */
+const MIDWEEK = new Date('2026-11-21T14:00:00.000Z');
+const NOBODY: WalletGateCallerContext = {};
+
+describe('RET-695 final-day drain rule', () => {
+  it('opens the daily stop to the remaining weekly pool on the final day', () => {
+    // Day spend is already past the 10/day line, but the pool has 30 left —
+    // the wallet must drain it instead of idling until the reset.
+    const decision = evaluateWalletBudget(
+      DRAIN_CONFIG,
+      { day_usd: 15, week_usd: 30 },
+      NOBODY,
+      FINAL_HOUR,
+    );
+    expect(decision).toEqual({ allowed: true });
+  });
+
+  it('rejects on the drain line once the day spend eats the remaining pool', () => {
+    const decision = evaluateWalletBudget(
+      DRAIN_CONFIG,
+      { day_usd: 30, week_usd: 30 },
+      NOBODY,
+      FINAL_HOUR,
+    );
+    expect(decision.allowed).toBe(false);
+    if (!decision.allowed) {
+      expect(decision.rule).toBe('daily_cap'); // error taxonomy unchanged
+      expect(decision.drain?.line_usd).toBe(30);
+      expect(decision.detail).toContain('final-day drain');
+      expect(decision.detail).toContain('30.00 USD');
+    }
+  });
+
+  it('halts at zero once the weekly pool is exhausted', () => {
+    const decision = evaluateWalletBudget(
+      DRAIN_CONFIG,
+      { day_usd: 5, week_usd: 60 },
+      NOBODY,
+      FINAL_HOUR,
+    );
+    expect(decision.allowed).toBe(false);
+    if (!decision.allowed) {
+      expect(decision.rule).toBe('daily_cap');
+      expect(decision.drain?.line_usd).toBe(0);
+      expect(decision.detail).toContain('halts at zero');
+    }
+  });
+
+  it('keeps the plain daily cap mid-week', () => {
+    const decision = evaluateWalletBudget(
+      DRAIN_CONFIG,
+      { day_usd: 15, week_usd: 30 },
+      NOBODY,
+      MIDWEEK,
+    );
+    expect(decision.allowed).toBe(false);
+    if (!decision.allowed) {
+      expect(decision.rule).toBe('daily_cap');
+      expect(decision.detail).toContain('daily line 10.00 USD');
+      expect(decision.detail).not.toContain('drain');
+      expect(decision.drain).toBeUndefined();
+    }
+  });
+
+  it('kill switch (options.finalDayDrain=false) restores the plain daily cap', () => {
+    const decision = evaluateWalletBudget(
+      DRAIN_CONFIG,
+      { day_usd: 15, week_usd: 30 },
+      NOBODY,
+      FINAL_HOUR,
+      { finalDayDrain: false },
+    );
+    expect(decision.allowed).toBe(false);
+    if (!decision.allowed) {
+      expect(decision.rule).toBe('daily_cap');
+      expect(decision.detail).toContain('daily line 10.00 USD');
+      expect(decision.drain).toBeUndefined();
+    }
+  });
+
+  it('is inert without a weekly line', () => {
+    const decision = evaluateWalletBudget(
+      { daily_usd: 10 },
+      { day_usd: 15, week_usd: 300 },
+      NOBODY,
+      FINAL_HOUR,
+    );
+    expect(decision.allowed).toBe(false);
+    if (!decision.allowed) {
+      expect(decision.detail).toContain('daily line 10.00 USD');
+      expect(decision.drain).toBeUndefined();
+    }
+  });
+
+  it("follows the wallet's own week_anchor_utc (07:13-style), not only midnight weeks", () => {
+    const anchor = { ...DRAIN_CONFIG, week_anchor_utc: '07:13' };
+    // Week opened Monday 2026-11-16T07:13Z → resets Monday 2026-11-23T07:13Z.
+    const late = new Date('2026-11-22T20:00:00.000Z'); // 11.2h left — final day
+    expect(evaluateWalletBudget(anchor, { day_usd: 15, week_usd: 30 }, NOBODY, late)).toEqual({
+      allowed: true,
+    });
+    const early = new Date('2026-11-20T13:00:00.000Z'); // ~66h left — not yet
+    const decision = evaluateWalletBudget(anchor, { day_usd: 15, week_usd: 30 }, NOBODY, early);
+    expect(decision.allowed).toBe(false);
+  });
+
+  it('M200 message shows the drain line as the threshold, taxonomy unchanged', () => {
+    const rejected = evaluateWalletBudget(
+      DRAIN_CONFIG,
+      { day_usd: 30, week_usd: 30 },
+      NOBODY,
+      FINAL_HOUR,
+    ) as Extract<WalletBudgetDecision, { allowed: false }>;
+    expect(
+      walletBudgetMessage('MAIN', rejected, DRAIN_CONFIG, { day_usd: 30, week_usd: 30 }),
+    ).toEqual({
+      metric: 'MAIN wallet daily cap', // unchanged metric/taxonomy
+      used: '30.00 USD',
+      threshold: '30.00 USD', // the drain line, not the 10/day configured line
+      period: 'today (SDQ)',
+    });
+  });
+
+  it('kill-switch env maps like the governor switch (default ON)', () => {
+    expect(WALLET_FINAL_DAY_DRAIN_ENV).toBe('MANIFEST_WALLET_FINAL_DAY_DRAIN');
+    expect(resolveWalletFinalDayDrain(undefined)).toBe(true);
+    expect(resolveWalletFinalDayDrain('1')).toBe(true);
+    expect(resolveWalletFinalDayDrain('0')).toBe(false);
+    expect(resolveWalletFinalDayDrain(' 0 ')).toBe(false);
+    expect(resolveWalletFinalDayDrain('false')).toBe(false);
+    expect(resolveWalletFinalDayDrain('no')).toBe(false);
+    expect(resolveWalletFinalDayDrain('typo')).toBe(true);
+  });
+});
+
+describe('nextWeeklyReset / isFinalDayBeforeWeeklyReset', () => {
+  it('closes the week at the Monday anchor (+7d)', () => {
+    expect(nextWeeklyReset(MIDWEEK, '00:00').toISOString()).toBe('2026-11-23T00:00:00.000Z');
+    expect(nextWeeklyReset(FINAL_HOUR, '07:13').toISOString()).toBe('2026-11-23T07:13:00.000Z');
+  });
+
+  it('flags exactly the last 24h before the reset', () => {
+    expect(isFinalDayBeforeWeeklyReset(FINAL_HOUR, '00:00')).toBe(true); // 1h left
+    expect(isFinalDayBeforeWeeklyReset(new Date('2026-11-22T00:00:00.000Z'), '00:00')).toBe(true);
+    expect(isFinalDayBeforeWeeklyReset(new Date('2026-11-21T23:59:00.000Z'), '00:00')).toBe(false);
+    expect(isFinalDayBeforeWeeklyReset(new Date('2026-11-23T00:00:00.000Z'), '00:00')).toBe(false);
   });
 });

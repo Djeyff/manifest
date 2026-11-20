@@ -7,9 +7,11 @@ import {
   isOwnerAnswerTrigger,
   parseWalletBudget,
   resolveWalletBudgetMode,
+  resolveWalletFinalDayDrain,
   weekWindowStart,
   dayWindowStart,
   WALLET_BUDGET_MODE_ENV,
+  WALLET_FINAL_DAY_DRAIN_ENV,
   WALLET_NIGHT_WINDOW_DEFAULT_OFFSET_MINUTES,
   type ParsedWalletBudget,
   type WalletBudgetConfig,
@@ -185,13 +187,20 @@ export class WalletBudgetService implements WalletBudgetGate {
     const effectiveConfig = wallet?.governs ? parseWalletBudget(wallet.budget).config! : config;
     const scope = wallet?.governs ? wallet.member_key_ids : [tenantProviderId];
     const spend = await this.spendForScope(scope, effectiveConfig, now);
-    return { spend, decision: evaluateWalletBudget(effectiveConfig, spend, caller, now) };
+    return {
+      spend,
+      decision: evaluateWalletBudget(effectiveConfig, spend, caller, now, {
+        // RET-695 kill switch (MANIFEST_WALLET_FINAL_DAY_DRAIN), read fresh
+        // per request exactly like the posture mode knob.
+        finalDayDrain: resolveWalletFinalDayDrain(process.env[WALLET_FINAL_DAY_DRAIN_ENV]),
+      }),
+    };
   }
 
   /** The wallet row (with its raw budget) that owns this key, if any. */
-  private async resolveWallet(tenantProviderId: string): Promise<
-    (WalletTarget & { budget: unknown; governs: boolean }) | null
-  > {
+  private async resolveWallet(
+    tenantProviderId: string,
+  ): Promise<(WalletTarget & { budget: unknown; governs: boolean }) | null> {
     const rows: Array<{
       wallet_id: string;
       name: string;
@@ -268,10 +277,11 @@ export class WalletBudgetService implements WalletBudgetGate {
   ): Promise<TierPolicyBlock | null> {
     if (!headerTierId || this.mode() === 'off') return null;
     if (isOwnerAnswerTrigger(caller.triggerHeader)) return null;
-    const rows: Array<{ name: string; architect_answer_only: boolean }> = await this.dataSource.query(
-      `SELECT "name", "architect_answer_only" FROM "header_tiers" WHERE "id" = $1`,
-      [headerTierId],
-    );
+    const rows: Array<{ name: string; architect_answer_only: boolean }> =
+      await this.dataSource.query(
+        `SELECT "name", "architect_answer_only" FROM "header_tiers" WHERE "id" = $1`,
+        [headerTierId],
+      );
     const tier = rows?.[0];
     if (!tier?.architect_answer_only) return null;
     this.logger.warn(
