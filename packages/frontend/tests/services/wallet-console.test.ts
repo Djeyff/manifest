@@ -80,8 +80,8 @@ const dailyBudget = {
       drain_window: false,
       allow: true,
       halted: false,
-      day_number: null,
-      day_index: null,
+      day_number: 1,
+      day_index: 0,
       ration_model: 'RET-670-V3',
       reasons: [],
       halted_by_console: false,
@@ -184,9 +184,43 @@ describe('wallet console reads (live RET-720 contract)', () => {
   it('maps the daily budget onto progress blocks with the used/allowed split', async () => {
     const data = await getDailyProgress();
     expect(data.demo).toBe(false);
+    expect(data.available).toBe(true);
     expect(data.blocks[0].used_pct).toBeCloseTo(4.092248, 6);
     expect(data.blocks[0].allowed_pct).toBeCloseTo(10.74409, 6);
     expect(data.blocks[0].still_allowed_pct).toBeCloseTo(6.651842, 6);
+    expect(data.blocks[0].published).toBe(true);
+    expect(data.blocks[0].account).toBe('MAIN');
+  });
+
+  it('reports the governor’s own day window instead of a wall-clock midnight', async () => {
+    const data = await getDailyProgress();
+    expect(data.blocks[0].day_label).toBe('day 1');
+    expect(data.blocks[0].resets_label).toBe('day 1');
+  });
+
+  it('draws no bar when the governor published no line (no 0.0% fiction)', async () => {
+    mockFetchJson.mockImplementation((url: string) => {
+      if (url === '/quota-board') return Promise.resolve(quotaBoard);
+      if (url === '/budgets/daily')
+        return Promise.resolve({
+          ...dailyBudget,
+          available: false,
+          unavailable_reason: 'ration state unreadable at /opt/data/shared/state/ret670-ration.json',
+          accounts: [],
+          wallets: [{ ...dailyBudget.wallets[0], accounts: [] }],
+        });
+      if (url === '/wallets/w-main/settings') return Promise.resolve({ settings: rawSettings });
+      if (url === '/wallets/w-main/settings/audit') return Promise.resolve({ audit: [] });
+      return Promise.reject(new Error(`API error: 404 Not Found (${url})`));
+    });
+    const data = await getDailyProgress();
+    expect(data.available).toBe(false);
+    expect(data.unavailable_reason).toMatch(/ration state unreadable/);
+    expect(data.blocks.length).toBe(1);
+    expect(data.blocks[0].published).toBe(false);
+    // The block carries no spend numbers, so nothing can be drawn as 0%.
+    expect(data.blocks[0].used_pct).toBe(0);
+    expect(data.blocks[0].published_note).toMatch(/ration state unreadable/);
   });
 
   it('falls back to the demo payload when the console surface is not deployed (404)', async () => {

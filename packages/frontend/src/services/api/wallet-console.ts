@@ -142,6 +142,25 @@ export interface ProgressBlock {
   resets_label?: string | null;
   reset_hint?: string | null;
   note?: string | null;
+  /**
+   * The governor account this block reports. A wallet can own more than one
+   * account, and each account carries its OWN day window — so the console
+   * reports one block per account, never one merged number for the wallet.
+   */
+  account?: string | null;
+  /**
+   * The wallet's own day window, as the governor numbered it (day N of the
+   * ration week). Never a wall-clock midnight anchor.
+   */
+  day_label?: string | null;
+  /**
+   * False when the server published no line for this block. A block that is
+   * not published renders an empty state — NEVER a 0.0% bar, because a zero
+   * bar reads as "nothing was spent" when the truth is "no data".
+   */
+  published: boolean;
+  /** Why the block has no line, in the server's own words. */
+  published_note?: string | null;
 }
 
 export interface BurnMeter {
@@ -173,6 +192,14 @@ export interface ProgressResponse {
   day_strip?: Array<{ day: string; pct: number; over?: boolean; drain?: boolean }> | null;
   /** Audit & rulings, when the server supplies them for this surface. */
   audit?: WalletAuditEntry[] | null;
+  /**
+   * False when the server has no governor state to report (the ration state
+   * is missing or unreadable). The console says so instead of drawing empty
+   * bars that look like "nothing was spent".
+   */
+  available: boolean;
+  /** The server's own reason, shown verbatim in the empty state. */
+  unavailable_reason?: string | null;
 }
 
 export interface AskCrewResponse {
@@ -381,12 +408,16 @@ export const DEMO_BALANCER: LoadBalancerResponse = {
 
 export const DEMO_PROGRESS: ProgressResponse = {
   demo: true,
+  available: true,
   blocks: [
     {
       wallet_id: 'w-main',
       name: 'MAIN',
       color: 'main',
       provider: 'zai-max',
+      account: 'zai-max',
+      day_label: 'day 3 of 7',
+      published: true,
       used_pct: 9.1,
       allowed_pct: 14.6,
       projected_pct: 13.8,
@@ -403,6 +434,9 @@ export const DEMO_PROGRESS: ProgressResponse = {
       name: 'MM',
       color: 'mm',
       provider: 'minimax',
+      account: 'minimax',
+      day_label: 'day 3 of 7',
+      published: true,
       used_pct: 11.2,
       allowed_pct: 12.4,
       projected_pct: 24.6,
@@ -420,6 +454,9 @@ export const DEMO_PROGRESS: ProgressResponse = {
       name: 'BACKUP',
       color: 'backup',
       provider: 'zai-pro',
+      account: 'zai-pro',
+      day_label: 'day 3 of 7',
+      published: true,
       used_pct: 0.4,
       allowed_pct: 10.3,
       projected_pct: 1.1,
