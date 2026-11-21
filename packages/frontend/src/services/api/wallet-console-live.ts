@@ -1,7 +1,8 @@
 import { fetchJson, fetchMutate } from './core';
 import type {
-  LoadBalancerResponse,
+  ProgressBlock,
   ProgressResponse,
+  LoadBalancerResponse,
   WalletAuditEntry,
   WalletBehaviour,
   WalletFormulaStrip,
@@ -470,54 +471,129 @@ export function mapLoadBalancerResponse(data: LiveConsoleData): LoadBalancerResp
   };
 }
 
+/**
+ * The governor's own day window for an account, in the server's numbering.
+ * NEVER a wall-clock midnight anchor: MM's day is its own window (00:00Z for
+ * the owner), and the ration week starts where the provider's window does.
+ */
+function dayLabel(account: RawDailyAccount | undefined): string | null {
+  if (!account) return null;
+  if (typeof account.day_number === 'number') return `day ${account.day_number}`;
+  return null;
+}
+
+/**
+ * Daily progress blocks.
+ *
+ * One block per (wallet, governor account) pair — a wallet can own more than
+ * one account and each account carries its OWN day window and its OWN line,
+ * so a single merged "wallet" number would lie.
+ *
+ * A block is only `published` when the server actually published a line for
+ * it. An unpublished block renders an empty state; it never renders a 0.0%
+ * bar, because a zero bar reads as "nothing was spent" when the truth is
+ * "no data was published".
+ */
 export function mapProgressResponse(data: LiveConsoleData): ProgressResponse {
   const accountByName = new Map(data.daily.accounts.map((a) => [a.account, a]));
-  const blocks = data.daily.wallets.map((wallet) => {
-    const accounts = wallet.accounts
-      .map((name) => accountByName.get(name))
-      .filter((a): a is RawDailyAccount => Boolean(a));
-    const account = accounts[0];
-    const allowed = num(account?.allowed_today_pct);
-    const used = num(account?.used_today_pct);
-    const remaining = num(account?.remaining_today_pct, Math.max(allowed - used, 0));
-    const base = num(account?.base_pct);
-    const rollover = num(account?.rollover_pool_pct);
-    const floor = num(account?.floor_pct);
+  const blocks: ProgressBlock[] = [];
 
-    return {
-      wallet_id: wallet.wallet_id,
-      name: wallet.name,
-      color: data.board.wallets.find((w) => w.wallet_id === wallet.wallet_id)?.color ?? '—',
-      provider: data.board.wallets.find((w) => w.wallet_id === wallet.wallet_id)?.keys[0]?.provider ?? '—',
-      used_pct: used,
-      allowed_pct: allowed,
-      projected_pct: used,
-      still_allowed_pct: remaining,
-      floor_pct: floor,
-      pace:
-        used > allowed
-          ? ('behind' as const)
-          : allowed > 0 && used <= allowed * 0.5
-            ? ('ahead' as const)
-            : ('on-pace' as const),
-      badges: [
-        ...(account?.drain_day ? ['drain day'] : []),
-        ...(account?.halted_by_console ? ['parked from console'] : []),
-        ...(account?.halted ? ['halted'] : []),
-      ],
-      formula: formulaFrom(base, rollover, floor, allowed, 'allowed today'),
-      resets_label: resetLabel(
-        data.board.wallets.find((w) => w.wallet_id === wallet.wallet_id)?.keys[0]?.five_h_reset_at,
-      ),
-      reset_hint: null,
-      note: account?.halted_by_console ? 'Parked from the console.' : null,
-    };
-  });
+  for (const wallet of data.daily.wallets) {
+    const boardWallet = data.board.wallets.find((w) => w.wallet_id === wallet.wallet_id);
+    const provider = boardWallet?.keys[0]?.provider ?? '—';
+    const color = boardWallet?.color ?? '—';
+    const accountNames = wallet.accounts ?? [];
+
+    if (accountNames.length === 0) {
+      // The governor published no account for this wallet.
+      blocks.push({
+        wallet_id: wallet.wallet_id,
+        name: wallet.name,
+        color,
+        provider,
+        account: null,
+        day_label: null,
+        published: false,
+        published_note:
+          data.daily.unavailable_reason ??
+          'The governor published no account for this wallet, so there is no line to show.',
+        used_pct: 0,
+        allowed_pct: 0,
+        projected_pct: 0,
+        still_allowed_pct: 0,
+        floor_pct: 0,
+        pace: 'on-pace',
+        badges: [],
+        formula: formulaFrom(0, 0, 0, 0, 'today allowed'),
+        resets_label: null,
+        reset_hint: null,
+        note: null,
+      });
+      continue;
+    }
+
+    for (const accountName of accountNames) {
+      const account = accountByName.get(accountName);
+      const published =
+        account !== undefined &&
+        typeof account.allowed_today_pct === 'number' &&
+        typeof account.used_today_pct === 'number';
+
+      const allowed = num(account?.allowed_today_pct);
+      const used = num(account?.used_today_pct);
+      const remaining = num(account?.remaining_today_pct, Math.max(allowed - used, 0));
+      const base = num(account?.base_pct);
+      const rollover = num(account?.rollover_pool_pct);
+      const floor = num(account?.floor_pct);
+
+      blocks.push({
+        wallet_id: wallet.wallet_id,
+        name: wallet.name,
+        color,
+        provider,
+        account: accountName,
+        day_label: dayLabel(account),
+        published,
+        published_note: published
+          ? null
+          : (data.daily.unavailable_reason ??
+            'The governor published no line for this account, so there is nothing to draw.'),
+        used_pct: used,
+        allowed_pct: allowed,
+        projected_pct: used,
+        still_allowed_pct: remaining,
+        floor_pct: floor,
+        pace:
+          used > allowed
+            ? ('behind' as const)
+            : allowed > 0 && used <= allowed * 0.5
+              ? ('ahead' as const)
+              : ('on-pace' as const),
+        badges: [
+          ...(account?.drain_day ? ['drain day'] : []),
+          ...(account?.halted_by_console ? ['parked from console'] : []),
+          ...(account?.halted ? ['halted'] : []),
+        ],
+        formula: formulaFrom(base, rollover, floor, allowed, 'allowed today'),
+        // The daily bar's window is the governor's own — never the provider's
+        // 5-hour reset stamp, and never a wall-clock midnight.
+        resets_label: dayLabel(account),
+        reset_hint: account?.ration_model ? `${account.ration_model} day window` : null,
+        note: account?.halted_by_console ? 'Parked from the console.' : null,
+      });
+    }
+  }
 
   const headroom = num(data.daily.accounts[0]?.weekly_headroom_pct);
 
   return {
     demo: false,
+    available: data.daily.available && data.daily.accounts.length > 0,
+    unavailable_reason: data.daily.available
+      ? (data.daily.accounts.length > 0
+          ? null
+          : 'The governor published no accounts, so there are no lines to show.')
+      : data.daily.unavailable_reason,
     blocks,
     burn: {
       in_flight: 0,

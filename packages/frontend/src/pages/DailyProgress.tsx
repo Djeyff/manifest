@@ -141,6 +141,14 @@ export default function DailyProgress() {
                 is where the day is projected to land at reset.
               </Callout>
 
+              <Show when={data().available === false}>
+                <Callout tone="danger">
+                  <b>No governor state is published, so no bars are drawn.</b>{' '}
+                  {data().unavailable_reason ??
+                    'The daily budget read returned no governor state. Empty bars would read as "nothing was spent", so the console says so instead.'}
+                </Callout>
+              </Show>
+
               <For each={visibleBlocks()}>
                 {(block) => {
                   const used = () => block.used_pct;
@@ -158,81 +166,107 @@ export default function DailyProgress() {
                             </WalletChip>
                           </div>
                           <div class="wc-note" style="margin-top:4px">
-                            Today · {block.resets_label} · {block.reset_hint}
+                            <Show
+                              when={block.account}
+                              fallback={
+                                <span>
+                                  No governor account is mapped to this wallet yet.
+                                </span>
+                              }
+                            >
+                              <span>
+                                Account {block.account} · {block.day_label ?? 'day window unknown'} ·{' '}
+                                {block.reset_hint ?? ''}
+                              </span>
+                            </Show>
                           </div>
                         </div>
                         <div class="wc-progress-block__badges">
-                          <span class={`wc-pace wc-pace--${block.pace}`}>
-                            {paceLabel(block.pace)}
-                          </span>
+                          <Show when={block.published}>
+                            <span class={`wc-pace wc-pace--${block.pace}`}>
+                              {paceLabel(block.pace)}
+                            </span>
+                          </Show>
                           <For each={block.badges}>
                             {(badge) => <Pill tone="drain">{badge}</Pill>}
                           </For>
                         </div>
                       </div>
 
-                      <div class="wc-meter-block">
-                        <div class="wc-meter-row">
-                          <span class="wc-meter-row__label">Today used vs today allowed</span>
-                          <span class="wc-meter-row__value">
-                            {used().toFixed(1)}% of {block.allowed_pct.toFixed(1)}%
-                            <small>{allow().toFixed(1)}% of the line still allowed</small>
-                          </span>
-                        </div>
-                        <div
-                          class="wc-stack-bar"
-                          role="img"
-                          aria-label={`${block.name}: ${used().toFixed(1)} percent used of ${block.allowed_pct.toFixed(1)} percent allowed; projected to land at ${block.projected_pct.toFixed(1)} percent at reset, which is ${paceLabel(block.pace)}.`}
-                        >
-                          <div class="wc-stack-bar__seg wc-stack-bar__seg--used" style={`width:${used()}%`} />
+                      <Show
+                        when={block.published}
+                        fallback={
+                          <div class="wc-state" role="status">
+                            <b>No line published for {block.account ?? 'this wallet'}.</b>
+                            <br />
+                            {block.published_note ??
+                              'The governor published no line, so the console draws nothing rather than a 0% bar.'}
+                          </div>
+                        }
+                      >
+                        <div class="wc-meter-block">
+                          <div class="wc-meter-row">
+                            <span class="wc-meter-row__label">Today used vs today allowed</span>
+                            <span class="wc-meter-row__value">
+                              {used().toFixed(1)}% of {block.allowed_pct.toFixed(1)}%
+                              <small>{allow().toFixed(1)}% of the line still allowed</small>
+                            </span>
+                          </div>
                           <div
-                            class="wc-stack-bar__seg wc-stack-bar__seg--allow"
-                            style={`width:${allow()}%`}
-                          />
-                          <div
-                            class="wc-stack-bar__seg wc-stack-bar__seg--floor"
-                            style={`width:${floor()}%`}
-                          />
-                          <div
-                            class="wc-stack-bar__seg wc-stack-bar__seg--unused"
-                            style={`width:${unused()}%`}
-                          />
-                          <span
-                            class="wc-stack-bar__mark"
-                            style={`left:${block.projected_pct}%`}
-                            data-label={`proj ${block.projected_pct.toFixed(1)}%`}
-                          />
-                        </div>
-                        <div class="wc-legend">
-                          <span class="wc-legend__item">
-                            <span class="wc-legend__swatch wc-legend__swatch--used" />
-                            used today ({used().toFixed(1)}%)
-                          </span>
-                          <span class="wc-legend__item">
-                            <span class="wc-legend__swatch" style="background:hsl(var(--bar-output))" />
-                            still allowed today ({allow().toFixed(1)}%)
-                          </span>
-                          <span class="wc-legend__item">
-                            <span
-                              class="wc-legend__swatch"
-                              style="background:hsl(var(--warning) / 0.55)"
+                            class="wc-stack-bar"
+                            role="img"
+                            aria-label={`${block.name}: ${used().toFixed(1)} percent used of ${block.allowed_pct.toFixed(1)} percent allowed; projected to land at ${block.projected_pct.toFixed(1)} percent at reset, which is ${paceLabel(block.pace)}.`}
+                          >
+                            <div class="wc-stack-bar__seg wc-stack-bar__seg--used" style={`width:${used()}%`} />
+                            <div
+                              class="wc-stack-bar__seg wc-stack-bar__seg--allow"
+                              style={`width:${allow()}%`}
                             />
-                            emergency floor ({floor().toFixed(1)}%) — locked
-                          </span>
-                          <span class="wc-legend__item">
-                            <span class="wc-legend__mark" />
-                            projection at reset ({block.projected_pct.toFixed(1)}%)
-                          </span>
+                            <div
+                              class="wc-stack-bar__seg wc-stack-bar__seg--floor"
+                              style={`width:${floor()}%`}
+                            />
+                            <div
+                              class="wc-stack-bar__seg wc-stack-bar__seg--unused"
+                              style={`width:${unused()}%`}
+                            />
+                            <span
+                              class="wc-stack-bar__mark"
+                              style={`left:${block.projected_pct}%`}
+                              data-label={`proj ${block.projected_pct.toFixed(1)}%`}
+                            />
+                          </div>
+                          <div class="wc-legend">
+                            <span class="wc-legend__item">
+                              <span class="wc-legend__swatch wc-legend__swatch--used" />
+                              used today ({used().toFixed(1)}%)
+                            </span>
+                            <span class="wc-legend__item">
+                              <span class="wc-legend__swatch" style="background:hsl(var(--bar-output))" />
+                              still allowed today ({allow().toFixed(1)}%)
+                            </span>
+                            <span class="wc-legend__item">
+                              <span
+                                class="wc-legend__swatch"
+                                style="background:hsl(var(--warning) / 0.55)"
+                              />
+                              emergency floor ({floor().toFixed(1)}%) — locked
+                            </span>
+                            <span class="wc-legend__item">
+                              <span class="wc-legend__mark" />
+                              projection at reset ({block.projected_pct.toFixed(1)}%)
+                            </span>
+                          </div>
                         </div>
-                      </div>
 
-                      <div style="margin-top:16px">
-                        <Formula
-                          formula={block.formula}
-                          used={block.used_pct}
-                          projected={block.projected_pct}
-                        />
-                      </div>
+                        <div style="margin-top:16px">
+                          <Formula
+                            formula={block.formula}
+                            used={block.used_pct}
+                            projected={block.projected_pct}
+                          />
+                        </div>
+                      </Show>
 
                       <Show when={block.note}>
                         <Callout tone="warn">{block.note}</Callout>
