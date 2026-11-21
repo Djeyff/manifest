@@ -5,6 +5,7 @@ import { checkIsSelfHosted, checkMcpEnabled } from '../services/setup-status.js'
 import AddAgentModal from './AddAgentModal.jsx';
 import ServicesContactModal from './ServicesContactModal.jsx';
 import { authClient } from '../services/auth-client.js';
+import { getWalletConsoleAccess } from '../services/api/wallet-console.js';
 
 interface SidebarProps {
   mobileOpen?: boolean;
@@ -44,6 +45,19 @@ const Sidebar: Component<SidebarProps> = (props) => {
     }
   });
   const showUpgrade = () => billing()?.enabled && billing()?.plan === 'free';
+  // Owner-only wallet console (RET-721). The nav group is hidden until the
+  // server confirms the owner role — UX only; the API gate is server-side.
+  const [walletConsoleAccess] = createResource(async () => {
+    try {
+      return await getWalletConsoleAccess();
+    } catch {
+      return { owner: false, demo: false };
+    }
+  });
+  // The nav group appears only when the server CONFIRMED the owner role
+  // (demo !== true). A missing endpoint must not reveal the group.
+  const showWalletConsole = () =>
+    walletConsoleAccess()?.owner === true && walletConsoleAccess()?.demo !== true;
   // A tenant without a subscription has a limit of 0 since the Cloud Free plan
   // ended: there is no allowance to meter, only the upgrade link stays.
   const hasAllowance = () => (billing()?.requests.limit ?? 0) > 0;
@@ -112,6 +126,34 @@ const Sidebar: Component<SidebarProps> = (props) => {
           </svg>
         </button>
       </div>
+      <Show when={showWalletConsole()}>
+        <div class="sidebar__section-label">WALLETS</div>
+        <A
+          href="/wallets/settings"
+          class="sidebar__link"
+          classList={{ active: isGlobalActive('/wallets/settings') }}
+          aria-current={isGlobalActive('/wallets/settings') ? 'page' : undefined}
+        >
+          Wallet settings
+        </A>
+        <A
+          href="/wallets/balancer"
+          class="sidebar__link"
+          classList={{ active: isGlobalActive('/wallets/balancer') }}
+          aria-current={isGlobalActive('/wallets/balancer') ? 'page' : undefined}
+        >
+          Load balancer
+        </A>
+        <A
+          href="/wallets/progress"
+          class="sidebar__link"
+          classList={{ active: isGlobalActive('/wallets/progress') }}
+          aria-current={isGlobalActive('/wallets/progress') ? 'page' : undefined}
+        >
+          Daily progress
+        </A>
+      </Show>
+
       <div class="sidebar__section-label">PROVIDERS</div>
       <Show when={selfHosted()}>
         <A

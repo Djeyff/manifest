@@ -161,6 +161,8 @@ export interface ProgressResponse {
   burn: BurnMeter;
   heatmap: { weeks: HeatmapWeek[]; note?: string | null };
   day_strip?: Array<{ day: string; pct: number; over?: boolean; drain?: boolean }> | null;
+  /** Audit & rulings, when the server supplies them for this surface. */
+  audit?: WalletAuditEntry[] | null;
 }
 
 export interface AskCrewResponse {
@@ -496,6 +498,19 @@ export const DEMO_PROGRESS: ProgressResponse = {
     { day: '19', pct: 58 },
     { day: '20', pct: 74, over: true },
     { day: '21', pct: 62 },
+  ],
+  audit: [
+    { at: '2026-11-21T00:04:00.000Z', summary: 'MAIN rollover set 4.3%', ruling_id: 'D-2026-11-21-03' },
+    {
+      at: '2026-11-20T17:02:00.000Z',
+      summary: 'Drain-day auto-lift enabled on all wallets',
+      ruling_id: 'D-2026-11-20-09',
+    },
+    {
+      at: '2026-11-19T23:23:00.000Z',
+      summary: 'Daily line doctrine corrected: base + reserve + rollover',
+      ruling_id: 'D-2026-11-19-04',
+    },
   ],
 };
 
