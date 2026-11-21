@@ -1,4 +1,14 @@
-import { fetchJson, fetchMutate } from './core';
+import { fetchMutate } from './core';
+import {
+  ConsoleUnavailableError,
+  loadLiveConsole,
+  mapLoadBalancerResponse,
+  mapProgressResponse,
+  mapSettingsResponse,
+  probeOwner,
+  putWalletLine,
+  rulingIdOf,
+} from './wallet-console-live';
 
 /**
  * Wallet console (RET-721) — the owner-only console on mnfs.retena.app.
@@ -515,55 +525,73 @@ export const DEMO_PROGRESS: ProgressResponse = {
 };
 
 /**
- * Reads a console endpoint, falling back to the demo payload when the live
- * API is not deployed yet (404/501) or the request fails. The fallback never
- * masks an auth failure: a 401/403 is re-thrown so the owner gate holds.
+ * Transport notes (RET-721 → RET-720, commit 54047be73).
+ *
+ * The console reads the REAL backend contract, not the fictional
+ * `/wallets/console/*` routes:
+ *
+ *   GET /wallets/:id/settings(+/audit)  ·  GET /quota-board  ·  GET /budgets/daily
+ *
+ * Failure classes are kept distinct, because they mean different things to
+ * the owner:
+ * - 403 → signed in, but not the tenant owner. Never falls back to demo.
+ * - 404 → the console surface is not deployed (feature flag off). Falls back
+ *   to the demo payload, flagged `demo: true`.
+ * - anything else → a real error, re-thrown.
  */
-async function readWithFallback<T>(
-  path: string,
-  fallback: T,
-): Promise<T> {
+async function withDemoFallback<T>(run: () => Promise<T>, fallback: T): Promise<T> {
   try {
-    const data = await fetchJson<T>(path, undefined, { cache: false });
-    return { ...(data as object), demo: false } as T;
+    return await run();
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (/Unauthorized|session|401|403/i.test(message)) throw err;
-    return fallback;
+    if (err instanceof ConsoleUnavailableError) return fallback;
+    throw err;
   }
 }
 
 export function getWalletSettings(): Promise<WalletSettingsResponse> {
-  return readWithFallback<WalletSettingsResponse>('/wallets/console/settings', DEMO_SETTINGS);
+  return withDemoFallback(
+    async () => mapSettingsResponse(await loadLiveConsole()),
+    DEMO_SETTINGS,
+  );
 }
 
 export function getLoadBalancer(): Promise<LoadBalancerResponse> {
-  return readWithFallback<LoadBalancerResponse>('/wallets/console/balancer', DEMO_BALANCER);
+  return withDemoFallback(
+    async () => mapLoadBalancerResponse(await loadLiveConsole()),
+    DEMO_BALANCER,
+  );
 }
 
 export function getDailyProgress(): Promise<ProgressResponse> {
-  return readWithFallback<ProgressResponse>('/wallets/console/progress', DEMO_PROGRESS);
+  return withDemoFallback(
+    async () => mapProgressResponse(await loadLiveConsole()),
+    DEMO_PROGRESS,
+  );
 }
 
 /**
- * Owner access check. When the endpoint is missing the console falls back to
- * "owner: true" so the demo build stays usable, but the response is flagged
- * `demo: true` so the UI can label the gate as unverified.
+ * Owner access check. There is no `/access` endpoint: `budgets/daily` is the
+ * cheapest owner-gated read (it makes no provider poll), so it doubles as the
+ * gate probe.
+ *
+ * - 200 → owner.
+ * - 403 → signed in, not the owner: a real verdict, never demo.
+ * - 404 → the console surface is not deployed: the demo build stays usable,
+ *   flagged `demo: true` so the UI can label the gate as unverified.
  */
 export async function getWalletConsoleAccess(): Promise<WalletConsoleAccess> {
   try {
-    const data = await fetchJson<{ owner: boolean }>('/wallets/console/access', undefined, {
-      cache: false,
-    });
-    return { owner: data.owner === true, demo: false };
+    const verdict = await probeOwner();
+    if (verdict.owner) return { owner: true, demo: false };
+    if (!verdict.available) return { owner: true, demo: true };
+    return { owner: false, demo: false };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // A refusal (401/403) is a real verdict from the server: the caller is not
-    // the owner. Only a MISSING endpoint falls back to the unverified demo gate.
     if (/Unauthorized|Forbidden|session|401|403/i.test(message)) {
       return { owner: false, demo: false };
     }
-    return { owner: true, demo: true };
+    if (/404|Not Found/i.test(message)) return { owner: true, demo: true };
+    throw err;
   }
 }
 
@@ -573,24 +601,36 @@ export interface UpdateLineInput {
   rollover_pct?: number;
 }
 
-/** Round-trips one settings line change. The response carries the new line. */
+/**
+ * Round-trips one settings line change against the live API.
+ *
+ * `PUT /wallets/:id/settings` writes the owner's daily line. The server mints
+ * the audit row and the auto-minted decisions-ledger ruling; the console then
+ * re-reads the board so the governor tick, the audit trail and the ruling id
+ * all come from the server rather than from the browser.
+ */
 export async function updateWalletLine(input: UpdateLineInput): Promise<WalletSettingsResponse> {
   try {
-    const data = await fetchMutate<WalletSettingsResponse>(
-      `/wallets/console/settings/${encodeURIComponent(input.wallet_id)}`,
-      {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          base_pct: input.base_pct,
-          rollover_pct: input.rollover_pct,
-        }),
-      },
+    const response = await putWalletLine({
+      wallet_id: input.wallet_id,
+      base_pct: input.base_pct ?? 0,
+      rollover_pct: input.rollover_pct ?? 0,
+      // The floor is not sent: it is a locked server-side value and the
+      // console only ever displays it.
+      floor_pct: undefined,
+    });
+    const fresh = mapSettingsResponse(await loadLiveConsole());
+    const rulingId = rulingIdOf(response);
+    if (!rulingId) return fresh;
+    // The freshly-read audit trail carries the ruling id when the server
+    // published one; when it does not, surface the id the PUT returned so the
+    // owner still sees which ruling was minted for this change.
+    const audit = fresh.audit.map((entry) =>
+      entry.ruling_id === rulingId ? entry : { ...entry, ruling_id: entry.ruling_id ?? rulingId },
     );
-    return { ...data, demo: false };
+    return { ...fresh, audit };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (!/API error: 404|API error: 501|Not Found/i.test(message)) throw err;
+    if (!(err instanceof ConsoleUnavailableError)) throw err;
     // Demo mode: apply the change locally so the round-trip (governor tick,
     // audit row, ruling) is still demonstrable without the live API.
     const settings = structuredClone(DEMO_SETTINGS);
@@ -629,7 +669,13 @@ export async function updateWalletLine(input: UpdateLineInput): Promise<WalletSe
   }
 }
 
-/** Files a needs-you card for the crew. */
+/**
+ * Files a needs-you card for the crew.
+ *
+ * RET-720 does not publish a filing route, so the console posts to the
+ * console path and reports the truth: when nothing is listening, the filing
+ * is a local hold (`demo: true`) rather than a fake crew card.
+ */
 export async function askCrew(message: string): Promise<AskCrewResponse> {
   try {
     const data = await fetchMutate<AskCrewResponse>('/wallets/console/ask-crew', {
@@ -641,6 +687,6 @@ export async function askCrew(message: string): Promise<AskCrewResponse> {
   } catch (err) {
     const messageText = err instanceof Error ? err.message : String(err);
     if (!/API error: 404|API error: 501|Not Found/i.test(messageText)) throw err;
-    return { ok: true, demo: true, card_ref: 'needs-you (demo)' };
+    return { ok: true, demo: true, card_ref: 'needs-you (local hold — no filing route published)' };
   }
 }

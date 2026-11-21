@@ -136,9 +136,9 @@ export default function DailyProgress() {
             <>
               <Callout>
                 <b>The arithmetic is the interface.</b> Every bar shows <i>used</i> against{' '}
-                <i>allowed</i>, and <i>allowed</i> is always spelled out as base + rollover + reserve −
-                floor — never a bare percentage, never a number the owner has to trust. The vertical
-                marker is where the day is projected to land at reset.
+                <i>allowed</i>, and <i>allowed</i> is always spelled out with the governor's own terms
+                — never a bare percentage, never a number the owner has to trust. The vertical marker
+                is where the day is projected to land at reset.
               </Callout>
 
               <For each={visibleBlocks()}>

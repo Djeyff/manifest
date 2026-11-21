@@ -47,7 +47,7 @@ export default function WalletSettings() {
       [walletId]: {
         base: prev[walletId]?.base ?? line.base_pct,
         rollover: prev[walletId]?.rollover ?? line.rollover_pct,
-        ...(key === 'base' ? { base: value } : { rollover: value }),
+        [key]: value,
       },
     }));
     setSaved(null);
@@ -140,7 +140,7 @@ export default function WalletSettings() {
 
               <section class="wc-panel" aria-labelledby="wc-lines-title">
                 <div class="wc-panel__title" id="wc-lines-title">
-                  Daily budget line <span class="sub">per wallet · base + rollover + reserve − floor</span>
+                  Daily budget line <span class="sub">per wallet · the server's own arithmetic</span>
                 </div>
                 <For each={data().lines}>
                   {(line) => {

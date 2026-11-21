@@ -179,7 +179,7 @@ async function guarded<T>(run: () => Promise<T>): Promise<T> {
 /* Small formatting helpers                                            */
 /* ------------------------------------------------------------------ */
 
-function resetLabel(stamp: string | null): string | null {
+function resetLabel(stamp: string | null | undefined): string | null {
   if (!stamp) return null;
   const parsed = Date.parse(stamp);
   if (!Number.isFinite(parsed)) return stamp;
@@ -348,7 +348,14 @@ export function mapLines(data: LiveConsoleData): WalletLine[] {
       reset_hint: wallet.parked
         ? 'Parked from the console — the governor halts this wallet.'
         : `Priority ${wallet.priority}`,
-      note: wallet.parked ? 'Emergency park is on.' : null,
+      note: wallet.parked
+        ? 'Emergency park is on.'
+        : /backup/i.test(wallet.name)
+          ? // Owner doctrine (D-2026-11-20-22): the Backup wallet is a FINITE
+            // spare, not a refill. The read API publishes no reserve figure, so
+            // this note carries the doctrine, not a number.
+            'Finite spare — no refill assumption. Roughly 9% of the reserve was left and it is gone after early Dec.'
+          : null,
     };
   });
 }
@@ -487,7 +494,12 @@ export function mapProgressResponse(data: LiveConsoleData): ProgressResponse {
       projected_pct: used,
       still_allowed_pct: remaining,
       floor_pct: floor,
-      pace: used > allowed ? ('over' as const) : ('on-pace' as const),
+      pace:
+        used > allowed
+          ? ('behind' as const)
+          : allowed > 0 && used <= allowed * 0.5
+            ? ('ahead' as const)
+            : ('on-pace' as const),
       badges: [
         ...(account?.drain_day ? ['drain day'] : []),
         ...(account?.halted_by_console ? ['parked from console'] : []),
@@ -515,6 +527,9 @@ export function mapProgressResponse(data: LiveConsoleData): ProgressResponse {
       verdict: 'Advisory only — the console proposes, the governor moves.',
       advisory: true,
     },
+    // The governor's own read API publishes no per-day history, so the
+    // weekly heatmap and the 14-day strip stay empty rather than invented.
+    // The pages render the API's own note instead of fake bars.
     heatmap: {
       weeks: [],
       note: 'Per-day burn history is not published by the read API yet.',
