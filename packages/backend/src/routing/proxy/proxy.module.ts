@@ -77,6 +77,6 @@ import { QuotaAccountingController } from './quota-accounting.controller';
     QuotaAccountingService,
     ZaiQuotaService,
   ],
-  exports: [ProviderClient],
+  exports: [ProviderClient, ZaiQuotaService],
 })
 export class ProxyModule {}
