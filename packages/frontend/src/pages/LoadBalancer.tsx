@@ -27,7 +27,7 @@ const REFRESH_MS = 15_000;
 export default function LoadBalancer() {
   const [access] = createResource(getWalletConsoleAccess);
   const [balancer, { refetch }] = createResource(
-    () => access()?.owner !== false,
+    () => access()?.owner === true,
     async () => getLoadBalancer(),
   );
   const [lastRefresh, setLastRefresh] = createSignal<string | null>(null);

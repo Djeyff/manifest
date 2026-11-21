@@ -558,7 +558,11 @@ export async function getWalletConsoleAccess(): Promise<WalletConsoleAccess> {
     return { owner: data.owner === true, demo: false };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (/Unauthorized|session|401/i.test(message)) return { owner: false, demo: false };
+    // A refusal (401/403) is a real verdict from the server: the caller is not
+    // the owner. Only a MISSING endpoint falls back to the unverified demo gate.
+    if (/Unauthorized|Forbidden|session|401|403/i.test(message)) {
+      return { owner: false, demo: false };
+    }
     return { owner: true, demo: true };
   }
 }

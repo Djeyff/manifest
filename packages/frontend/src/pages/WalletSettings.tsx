@@ -28,7 +28,7 @@ import {
 export default function WalletSettings() {
   const [access] = createResource(getWalletConsoleAccess);
   const [settings, { refetch }] = createResource(
-    () => access()?.owner !== false,
+    () => access()?.owner === true,
     async () => getWalletSettings(),
   );
   const [drafts, setDrafts] = createSignal<Record<string, { base: number; rollover: number }>>({});

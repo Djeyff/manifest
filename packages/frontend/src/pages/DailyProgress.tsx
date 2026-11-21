@@ -38,7 +38,7 @@ function paceLabel(pace: ProgressBlock['pace']): string {
 export default function DailyProgress() {
   const [access] = createResource(getWalletConsoleAccess);
   const [progress, { refetch }] = createResource(
-    () => access()?.owner !== false,
+    () => access()?.owner === true,
     async () => getDailyProgress(),
   );
   const [walletFilter, setWalletFilter] = createSignal<string>('all');
