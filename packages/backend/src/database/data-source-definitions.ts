@@ -62,6 +62,7 @@ import { CoverHarnessRequestsIndex1803100000000 } from './migrations/18031000000
 import { AddWalletBudgetColumns1803200000000 } from './migrations/1803200000000-AddWalletBudgetColumns';
 import { CreateWallets1803300000000 } from './migrations/1803300000000-CreateWallets';
 import { AddWalletSettings1803400000000 } from './migrations/1803400000000-AddWalletSettings';
+import { AddWalletConsoleRules1803500000000 } from './migrations/1803500000000-AddWalletConsoleRules';
 import { InitialSchema1771464895790 } from './migrations/1771464895790-InitialSchema';
 import { HashApiKeys1771500000000 } from './migrations/1771500000000-HashApiKeys';
 import { ModelPricingImprovements1771600000000 } from './migrations/1771600000000-ModelPricingImprovements';
@@ -364,4 +365,5 @@ export const migrations = [
   AddWalletBudgetColumns1803200000000,
   CreateWallets1803300000000,
   AddWalletSettings1803400000000,
+  AddWalletConsoleRules1803500000000,
 ];
