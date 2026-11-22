@@ -71,8 +71,15 @@ export class WalletConsoleController {
    * The registered provider keys a wallet can be bound to (D-2026-11-22-13).
    * The console's key-binding editor reads this list; the bindings themselves
    * are written through PUT /wallets/:id/settings.
+   *
+   * NOTE the path: it is NOT `/api/v1/wallets/keys`. The wallets controller
+   * (`@Controller('api/v1/wallets')`) owns a `@Get(':id')` route, and Express
+   * matches that param route BEFORE this controller's routes — so
+   * `/api/v1/wallets/keys` was swallowed by it and answered 404
+   * "Wallet not found". The key list lives under its own prefix so no
+   * `:id` route can shadow it.
    */
-  @Get('api/v1/wallets/keys')
+  @Get('api/v1/wallet-console/keys')
   async listKeys(@TenantCtx() ctx: TenantContext) {
     this.assertEnabled();
     if (!ctx.tenantId) throw new NotFoundException('Wallet not found');

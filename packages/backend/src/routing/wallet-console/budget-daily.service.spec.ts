@@ -54,30 +54,44 @@ function writeRationFile(): string {
   return file;
 }
 
-function fakeConsole(parked = false) {
+/** One wallet of the fake console, with the owner's own rules. */
+interface FakeWallet {
+  id: string;
+  name: string;
+  label: string;
+  parked?: boolean;
+  reserve_pct?: number | null;
+  rollover_enabled?: boolean;
+  cross_class_pause?: boolean;
+}
+
+function fakeConsole(wallets: FakeWallet[] = [{ id: 'wallet-1', name: 'MAIN', label: 'RCR' }]) {
   return {
     assertOwner: jest.fn(async () => undefined),
-    listWallets: jest.fn(async () => [
-      {
+    listWallets: jest.fn(async () =>
+      wallets.map((w) => ({
         wallet: {
-          id: 'wallet-1',
-          name: 'MAIN',
+          id: w.id,
+          name: w.name,
           color: 'indigo',
-          member_keys: [{ tenant_provider_id: 'tp-1', label: 'RCR', provider: 'zai' }],
+          member_keys: [{ tenant_provider_id: `tp-${w.id}`, label: w.label, provider: 'zai' }],
         },
         settings: {
-          wallet_id: 'wallet-1',
+          wallet_id: w.id,
           tenant_id: TENANT,
           drain_day_enabled: true,
           priority: 100,
-          parked,
+          parked: w.parked ?? false,
           kill_switch_fallback: false,
           daily_lines: null,
+          reserve_pct: w.reserve_pct ?? null,
+          rollover_enabled: w.rollover_enabled !== false,
+          cross_class_pause: w.cross_class_pause ?? false,
           updated_at: '2026-11-21T00:00:00.000Z',
           updated_by_user_id: OWNER,
         },
-      },
-    ]),
+      })),
+    ),
   } as unknown as WalletConsoleService;
 }
 
@@ -114,12 +128,50 @@ describe('BudgetDailyService (RET-720)', () => {
 
   it('reflects a parked wallet in the governor state (halted on the next tick)', async () => {
     process.env.MANIFEST_RET670_RATION_FILE = writeRationFile();
-    const service = new BudgetDailyService(fakeConsole(true));
+    const service = new BudgetDailyService(
+      fakeConsole([{ id: 'wallet-1', name: 'MAIN', label: 'RCR', parked: true }]),
+    );
     const daily = await service.daily(TENANT, OWNER);
     const account = daily.accounts.find((a) => a.account === 'zai-max');
     expect(account?.halted).toBe(true);
     expect(account?.halted_by_console).toBe(true);
     expect(account?.allow).toBe(false);
+  });
+
+  it('applies the owner reserve over the governor reserve', async () => {
+    process.env.MANIFEST_RET670_RATION_FILE = writeRationFile();
+    const service = new BudgetDailyService(
+      fakeConsole([{ id: 'wallet-1', name: 'MAIN', label: 'RCR', reserve_pct: 4.3 }]),
+    );
+    const daily = await service.daily(TENANT, OWNER);
+    const account = daily.accounts.find((a) => a.account === 'zai-max');
+    expect(account?.reserve_pct).toBe(4.3);
+    expect(account?.reasons.join(' ')).toContain('OWNER reserve 4.3%');
+  });
+
+  it('drops the rollover pool when the owner turns rollover off', async () => {
+    process.env.MANIFEST_RET670_RATION_FILE = writeRationFile();
+    const service = new BudgetDailyService(
+      fakeConsole([{ id: 'wallet-1', name: 'MAIN', label: 'RCR', rollover_enabled: false }]),
+    );
+    const daily = await service.daily(TENANT, OWNER);
+    const account = daily.accounts.find((a) => a.account === 'zai-max');
+    expect(account?.rollover_pool_pct).toBe(0);
+    expect(account?.reasons.join(' ')).toContain('OWNER rollover disabled');
+  });
+
+  it('pauses a cross-class wallet when another wallet is parked', async () => {
+    process.env.MANIFEST_RET670_RATION_FILE = writeRationFile();
+    const service = new BudgetDailyService(
+      fakeConsole([
+        { id: 'wallet-1', name: 'MAIN', label: 'RCR', parked: true },
+        { id: 'wallet-2', name: 'MM', label: 'CCR', cross_class_pause: true },
+      ]),
+    );
+    const daily = await service.daily(TENANT, OWNER);
+    const account = daily.accounts.find((a) => a.account === 'zai-max');
+    expect(account?.halted).toBe(true);
+    expect(account?.halted_by_console).toBe(true);
   });
 
   it('degrades to an unavailable state when the governor state is missing', async () => {

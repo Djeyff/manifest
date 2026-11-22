@@ -13,7 +13,10 @@ import { BASE_URL, fetchMutate, parseErrorMessage } from './core.js';
  *   GET  /wallets/:id/settings    → { settings: WalletSettingsView }
  *   PUT  /wallets/:id/settings    → { settings, changed, audit_id, ruling }
  *   GET  /wallets/:id/settings/audit → { audit: WalletAuditRow[] }
- *   GET  /wallets/keys            → { keys: ProviderKeyView[] }
+ *   GET  /wallet-console/keys     → { keys: ProviderKeyView[] }
+ *
+ * (`/wallet-console/keys`, not `/wallets/keys`: the wallets controller owns a
+ * `:id` route that shadows any sibling path under `/wallets/`.)
  */
 
 /** The owner-editable daily lines of a wallet (% of the weekly pool). */
@@ -170,9 +173,15 @@ export async function fetchWalletAudit(
   return body?.audit ?? [];
 }
 
-/** The registered provider keys a wallet can be bound to. */
+/**
+ * The registered provider keys a wallet can be bound to.
+ *
+ * The path is `/wallet-console/keys` — NOT `/wallets/keys`: the wallets
+ * controller owns a `:id` route that answers 404 for anything else under
+ * `/wallets/`.
+ */
 export async function fetchProviderKeys(): Promise<ProviderKeyView[]> {
-  const body = await getJson<{ keys?: ProviderKeyView[] }>('/wallets/keys');
+  const body = await getJson<{ keys?: ProviderKeyView[] }>('/wallet-console/keys');
   return body?.keys ?? [];
 }
 

@@ -5,6 +5,8 @@ import { WalletConsoleController } from './wallet-console.controller';
 import { WalletConsoleService } from './wallet-console.service';
 import { QuotaBoardService } from './quota-board.service';
 import { BudgetDailyService } from './budget-daily.service';
+import { WalletController } from '../wallets/wallet.controller';
+import { WalletService } from '../wallets/wallet.service';
 
 /**
  * HTTP receipts for the wallet console surface (RET-720): the three routes
@@ -32,6 +34,15 @@ describe('WalletConsoleController (RET-720)', () => {
       ruling: { id: 'D-2026-11-21-01', minted_at: '2026-11-21T18:00:00.000Z', persisted: true },
     })),
     listAudit: jest.fn(async () => []),
+    listProviderKeys: jest.fn(async () => [
+      {
+        id: 'tp-1',
+        label: 'RCR',
+        provider: 'zai',
+        room: 'RCR',
+        bound_wallet_id: 'wallet-1',
+      },
+    ]),
   };
   const quotaBoard = {
     board: jest.fn(async () => ({
@@ -52,11 +63,23 @@ describe('WalletConsoleController (RET-720)', () => {
       wallets: [],
     })),
   };
+  /**
+   * The REAL wallets controller is mounted on purpose: it owns a `:id` route
+   * under `/api/v1/wallets/`, and Express matches a param route before a
+   * sibling literal route — that shadowing is what broke the key list.
+   */
+  const wallets = {
+    list: jest.fn(async () => []),
+    find: jest.fn(async (_tenantId: string, id: string) => ({ id, shadowed: true })),
+  };
 
   beforeEach(async () => {
     const moduleRef = await Test.createTestingModule({
-      controllers: [WalletConsoleController],
+      // The wallets controller is registered FIRST — same order as the app
+      // modules, so the shadowing regression is actually exercised.
+      controllers: [WalletController, WalletConsoleController],
       providers: [
+        { provide: WalletService, useValue: wallets },
         { provide: WalletConsoleService, useValue: consoleService },
         { provide: QuotaBoardService, useValue: quotaBoard },
         { provide: BudgetDailyService, useValue: budgets },
@@ -101,6 +124,26 @@ describe('WalletConsoleController (RET-720)', () => {
     const res = await request(app.getHttpServer()).get('/api/v1/budgets/daily');
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('accounts');
+  });
+
+  it('GET /api/v1/wallet-console/keys answers the registered provider keys', async () => {
+    const res = await request(app.getHttpServer()).get('/api/v1/wallet-console/keys');
+    expect(res.status).toBe(200);
+    expect(res.body.keys).toHaveLength(1);
+    expect(res.body.keys[0].label).toBe('RCR');
+  });
+
+  it('keeps the key list off the shadowed /wallets/:id path', async () => {
+    // Regression: the key list used to live at `/api/v1/wallets/keys`, where
+    // the wallets controller's `:id` route answered it (404 "Wallet not
+    // found"). It now lives under its own prefix, so the console's key list
+    // is reachable and `/wallets/keys` belongs to the wallets CRUD.
+    const shadow = await request(app.getHttpServer()).get('/api/v1/wallets/keys');
+    expect(shadow.status).toBe(200);
+    expect(wallets.find).toHaveBeenCalledWith('tenant-1', 'keys');
+    const keys = await request(app.getHttpServer()).get('/api/v1/wallet-console/keys');
+    expect(keys.status).toBe(200);
+    expect(keys.body.keys[0].label).toBe('RCR');
   });
 
   it('404s the whole surface when the console flag is off (rollback lever)', async () => {

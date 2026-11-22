@@ -146,7 +146,21 @@ export class BudgetDailyService {
     const listed = await this.console.listWallets(tenantId, userId);
 
     const parkedAccounts = new Set<string>();
+    const crossPausedAccounts = new Set<string>();
+    /**
+     * The owner's own rules, per ration account. The console is the only
+     * place these live (wallet_settings), so the gateway applies them on top
+     * of the governor's published numbers: an owner reserve overrides the
+     * governor's reserve for the accounts of that wallet, and rollover off
+     * drops the rollover pool for those accounts.
+     */
+    const ownerRules = new Map<
+      string,
+      { reserve_pct: number | null; rollover_enabled: boolean }
+    >();
     const wallets: DailyBudgetWallet[] = [];
+    /** Any wallet of this tenant parked → wallets with the cross-class rule on pause too. */
+    const anyWalletParked = listed.some((entry) => entry.settings.parked);
     for (const entry of listed) {
       const accounts = new Set<string>();
       for (const member of entry.wallet.member_keys) {
@@ -155,6 +169,18 @@ export class BudgetDailyService {
       }
       if (entry.settings.parked) {
         for (const account of accounts) parkedAccounts.add(account);
+      }
+      for (const account of accounts) {
+        if (ownerRules.has(account)) continue;
+        ownerRules.set(account, {
+          reserve_pct: entry.settings.reserve_pct ?? null,
+          rollover_enabled: entry.settings.rollover_enabled !== false,
+        });
+      }
+      // Cross-class pause rule: when another wallet of this tenant is parked,
+      // this wallet's accounts pause as well.
+      if (entry.settings.cross_class_pause && anyWalletParked && !entry.settings.parked) {
+        for (const account of accounts) crossPausedAccounts.add(account);
       }
       wallets.push({
         wallet_id: entry.wallet.id,
@@ -170,7 +196,16 @@ export class BudgetDailyService {
     const accounts: DailyBudgetAccount[] = Object.entries(ration.accounts).map(
       ([name, status]) => {
         const decision: RationDecision = status.decision ?? {};
-        const haltedByConsole = parkedAccounts.has(name);
+        const rules = ownerRules.get(name);
+        const ownerReserve = rules?.reserve_pct ?? null;
+        const rolloverOff = rules !== undefined && rules.rollover_enabled === false;
+        const haltedByConsole = parkedAccounts.has(name) || crossPausedAccounts.has(name);
+        const reasons = [...(decision.reasons ?? [])];
+        if (ownerReserve !== null) reasons.push(`OWNER reserve ${ownerReserve}% of the weekly pool`);
+        if (rolloverOff) reasons.push('OWNER rollover disabled for this wallet');
+        if (crossPausedAccounts.has(name)) {
+          reasons.push('OWNER cross-class pause: another wallet is parked');
+        }
 
         const dayEpoch = ration.day_epoch ?? null;
         const elapsedHours =
@@ -196,9 +231,9 @@ export class BudgetDailyService {
           used_today_pct: decision.spent_today_pct ?? status.spent_today_pct ?? null,
           remaining_today_pct: decision.remaining_today_pct ?? null,
           base_pct: decision.base_pct ?? null,
-          rollover_pool_pct: decision.rollover_pool_pct ?? null,
+          rollover_pool_pct: rolloverOff ? 0 : (decision.rollover_pool_pct ?? null),
           floor_pct: decision.floor_pct ?? null,
-          reserve_pct: decision.reserve_pct ?? null,
+          reserve_pct: ownerReserve ?? decision.reserve_pct ?? null,
           accrued_at_lift_pct: decision.accrued_at_lift_pct ?? null,
           reserved_pct: decision.reserved_pct ?? null,
           reservation_holds: decision.reservation_holds ?? null,
@@ -219,7 +254,7 @@ export class BudgetDailyService {
           binding_dimension: decision.binding_dimension ?? null,
           capped_by_floor: decision.capped_by_floor ?? false,
           final_hour: decision.final_hour ?? false,
-          reasons: decision.reasons ?? [],
+          reasons,
           halted_by_console: haltedByConsole,
           anchor: anchor
             ? {
