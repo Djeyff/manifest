@@ -23,6 +23,7 @@ import { ModelPricesModule } from './model-prices/model-prices.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { RoutingModule } from './routing/routing.module';
 import { WalletsModule } from './routing/wallets/wallet.module';
+import { WalletConsoleModule } from './routing/wallet-console/wallet-console.module';
 import { PlaygroundModule } from './playground/playground.module';
 import { CommonModule } from './common/common.module';
 import { SseModule } from './sse/sse.module';
@@ -112,6 +113,7 @@ const mcpImports = mcpAvailability().enabled ? [McpModule] : [];
     NotificationsModule,
     RoutingModule,
     WalletsModule,
+    WalletConsoleModule,
     PlaygroundModule,
     SseModule,
     GithubModule,

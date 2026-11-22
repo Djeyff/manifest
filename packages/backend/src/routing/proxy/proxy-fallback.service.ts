@@ -53,6 +53,14 @@ interface ForwardProviderOptions {
   paramMergeContext?: ParamMergeContext;
   tenantProviderId?: string | null;
   startProviderAttempt?: StartProviderAttempt;
+  /**
+   * RET-647 scope 2b (D-2026-11-10-13): the tier's fallback hops that remain
+   * AFTER this one. When present and non-empty, a transient 429 never arms
+   * the shared-route cooldown — the chain serves the same request, so a route
+   * corpse would only pause the client ("no reason to cooldown if a fallback
+   * has credit"). Quota-class bodies keep their key-scoped handling above.
+   */
+  chainFallbacks?: ModelRoute[];
 }
 
 import { ProviderKeyService } from '../routing-core/provider-key.service';
@@ -98,10 +106,13 @@ import {
   type RouteCredentialDeps,
 } from './route-credentials';
 import { recordingResponseFromText } from './attempt-recording-capture';
+import { parseQuotaHalt, quotaHaltCooldownTtlMs } from './quota-halt';
+import { QuotaAccountingService } from './quota-accounting.service';
 import {
   CredentialRejectionCooldown,
   type RejectedCredentialRef,
 } from './credential-rejection-cooldown';
+import { KeyQuotaHaltRegistry, type KeyQuotaHaltRef } from './key-quota-halt';
 
 // Fallback cooldown applied when an upstream 429 carries no usable Retry-After.
 // Kept short (15s) on purpose: many providers rate-limit on brief RPM/burst
@@ -153,6 +164,13 @@ export class ProxyFallbackService {
   private readonly logger = new Logger(ProxyFallbackService.name);
   private readonly rateLimitCooldowns = new Map<string, number>();
   private readonly credentialRejections = new CredentialRejectionCooldown();
+  /**
+   * RET-647 (D-2026-11-10-13): keys a provider declared quota-drained until
+   * its own window flush. Key-scoped, never route-scoped — a halted key is
+   * skipped instantly at attempt-1 and auto-revives at the window reset,
+   * while funded fallbacks keep serving with zero client-visible pause.
+   */
+  private readonly keyQuotaHalts = new KeyQuotaHaltRegistry();
 
   constructor(
     private readonly providerKeyService: ProviderKeyService,
@@ -173,6 +191,7 @@ export class ProxyFallbackService {
     private readonly autofixService: AutofixService,
     @Optional()
     private readonly walletBudget?: WalletBudgetService,
+    private readonly quotaAccounting?: QuotaAccountingService,
   ) {}
 
   /**
@@ -601,6 +620,13 @@ export class ProxyFallbackService {
   }
 
   async tryForwardToProvider(opts: ForwardProviderOptions): Promise<ForwardResult> {
+    // RET-647: a key the provider declared quota-drained is skipped at
+    // attempt-1 — no upstream round-trip, no failed hop — so the funded
+    // fallback serves in the same request with zero client-visible pause.
+    const keyHaltUntil = this.keyQuotaHalts.haltedUntil(this.keyHaltRef(opts, opts.apiKey));
+    if (keyHaltUntil) {
+      return this.buildKeyQuotaHaltSkipForward(opts, keyHaltUntil);
+    }
     const cooldown = this.getActiveRateLimitCooldown(opts);
     if (cooldown) {
       return this.buildRateLimitCooldownForward(opts, cooldown);
@@ -618,7 +644,7 @@ export class ProxyFallbackService {
         opts,
         forward,
       );
-      this.recordRateLimitCooldown(opts, result.response);
+      await this.recordRateLimitCooldown(opts, result.response);
       // Still 401 after any OAuth refresh: the credential is stale (refresh
       // rejected, or the account itself is refused). Skip it until it changes.
       if (result.response.status === 401) {
@@ -704,6 +730,7 @@ export class ProxyFallbackService {
       | 'providerKeyLabel'
       | 'startProviderAttempt'
       | 'signal'
+      | 'chainFallbacks'
     > & { stream?: boolean },
   ): Promise<ForwardResult> {
     if (!forward.retryWireBody) {
@@ -722,17 +749,26 @@ export class ProxyFallbackService {
       if (attempt) attempt.completedAtMs = Date.now();
       // A healed retry can itself be rate-limited. Record the cooldown so the
       // next attempt on this route skips it, exactly as tryForwardToProvider
-      // does for a first attempt.
-      this.recordRateLimitCooldownForKey(
-        this.rateLimitCooldownKey({
-          agentId: opts.agentId,
-          authType: opts.authType,
-          provider: opts.provider,
-          providerKeyLabel: opts.providerKeyLabel,
-          model: opts.model,
-        }),
-        retried.response,
-      );
+      // does for a first attempt — unless the tier has funded fallback hops,
+      // in which case scope 2b keeps the route corpse un-armed (same rule as
+      // recordRateLimitCooldown).
+      if (!opts.chainFallbacks?.length) {
+        await this.recordRateLimitCooldownForKey(
+          this.rateLimitCooldownKey({
+            agentId: opts.agentId,
+            authType: opts.authType,
+            provider: opts.provider,
+            providerKeyLabel: opts.providerKeyLabel,
+            model: opts.model,
+          }),
+          retried.response,
+          opts.provider,
+        );
+      } else {
+        this.logger.debug(
+          `Transient 429 on healed retry ${opts.provider}/${opts.model}: route cooldown suppressed — funded fallback available`,
+        );
+      }
       return await this.bufferNonStreamBody(
         { ...retried, attempt, providerCallStarted: true },
         opts,
@@ -841,11 +877,95 @@ export class ProxyFallbackService {
     };
   }
 
-  private recordRateLimitCooldown(opts: ForwardProviderOptions, response: Response): void {
-    this.recordRateLimitCooldownForKey(this.rateLimitCooldownKey(opts), response);
+  /**
+   * Identity of the key a quota-window halt applies to (RET-647). Same shape
+   * as the 401 rejection ref: the secret actually sent upstream scopes the
+   * entry, so a re-key or OAuth refresh is tried again at once.
+   */
+  private keyHaltRef(opts: ForwardProviderOptions, secret: string): KeyQuotaHaltRef {
+    return {
+      tenantId: opts.tenantId,
+      connectionId: opts.tenantProviderId,
+      provider: opts.provider,
+      authType: opts.authType,
+      keyLabel: opts.providerKeyLabel,
+      model: opts.model,
+      secret,
+    };
   }
 
-  private recordRateLimitCooldownForKey(key: string | null, response: Response): void {
+  /**
+   * Local skip for a key with a live quota-window halt. The 429 keeps the
+   * fallback chain moving onto the funded fallback; the client never waits on
+   * a provably drained key, and the attempt is not persisted as a provider
+   * call (nothing reached the provider).
+   */
+  private buildKeyQuotaHaltSkipForward(
+    opts: ForwardProviderOptions,
+    untilMs: number,
+  ): ForwardResult {
+    const key = opts.providerKeyLabel ? `"${opts.providerKeyLabel}" ` : '';
+    const message =
+      `Provider ${opts.provider} reported the ${key}key's quota window drained; ` +
+      `it is skipped until the provider's window resets.`;
+    return this.buildLocalSkipForward(opts, 429, message, untilMs);
+  }
+
+  private async recordRateLimitCooldown(
+    opts: ForwardProviderOptions,
+    response: Response,
+  ): Promise<void> {
+    // RET-647 (D-2026-11-10-13): a quota-window halt (1310 class) proves only
+    // THIS key is drained, so it marks the key dead until the provider's own
+    // window flush and NEVER cools the shared route — other keys on the route
+    // and the funded fallback stay live, and the key auto-revives at the
+    // window reset. Transient 429s keep the route-cooldown treatment below.
+    // A quota halt can only exist on a 429 (parseQuotaHalt ignores other
+    // statuses), so non-429 responses skip the body probe entirely: probing
+    // awaited the response's full stream, which hung the hop on a 200 SSE
+    // that never sends a byte — before warm-up could fail it to the next
+    // fallback route (caught by the stalled-stream specs).
+    const body =
+      response.status === 429
+        ? await response.clone().text().catch(() => null)
+        : null;
+    const halt = body === null ? null : parseQuotaHalt(response.status, body, Date.now());
+    if (halt) {
+      this.keyQuotaHalts.halt(this.keyHaltRef(opts, opts.apiKey), halt.flushMs);
+      // The same probe pins the accounting window identity (RET-480-B2) —
+      // guarded, because telemetry can never break forwarding.
+      if (opts.provider) {
+        try {
+          this.quotaAccounting?.noteWindowFlush(opts.provider, halt.flushMs);
+        } catch {
+          // ignore accounting failures
+        }
+      }
+      return;
+    }
+    // RET-647 scope 2b (D-2026-11-10-13): a tier with a funded fallback never
+    // arms the shared-route cooldown — the chain serves the same request, so a
+    // route corpse would only pause the client. Tiers WITHOUT a chain keep
+    // today's behavior (arm and let the next attempt skip).
+    if (opts.chainFallbacks?.length) {
+      this.logger.debug(
+        `Transient 429 on ${opts.provider}/${opts.model}: route cooldown suppressed — ` +
+          `${opts.chainFallbacks.length} funded fallback hop(s) available`,
+      );
+      return;
+    }
+    await this.recordRateLimitCooldownForKey(
+      this.rateLimitCooldownKey(opts),
+      response,
+      opts.provider,
+    );
+  }
+
+  private async recordRateLimitCooldownForKey(
+    key: string | null,
+    response: Response,
+    provider?: string,
+  ): Promise<void> {
     if (response.status !== 429 || !key) return;
     if (this.rateLimitCooldowns.size >= MAX_RATE_LIMIT_COOLDOWNS) {
       this.evictExpiredRateLimitCooldowns();
@@ -853,8 +973,37 @@ export class ProxyFallbackService {
         this.evictOldestRateLimitCooldown();
       }
     }
-    const ttlMs = this.parseRetryAfterMs(response.headers.get('retry-after'));
+    const ttlMs = await this.rateLimitCooldownTtlMs(response, provider);
     this.rateLimitCooldowns.set(key, Date.now() + ttlMs);
+  }
+
+  /**
+   * Cooldown TTL for an upstream 429 (RET-480-B1). A quota-window halt adopts
+   * its real `next_flush_time` window — bounded [1s, 1h] and deliberately NOT
+   * clamped to the plain-429 5-minute cap, because every in-window retry
+   * provably fails. The body is probed through response.clone() so the error
+   * body stays unread for the client-facing path. Plain 429s keep the header /
+   * 15s-default treatment unchanged.
+   */
+  private async rateLimitCooldownTtlMs(response: Response, provider?: string): Promise<number> {
+    const body = await response
+      .clone()
+      .text()
+      .catch(() => null);
+    const halt = body === null ? null : parseQuotaHalt(response.status, body, Date.now());
+    if (halt) {
+      // The same probe pins the accounting window identity (RET-480-B2) —
+      // guarded, because telemetry can never break forwarding.
+      if (provider) {
+        try {
+          this.quotaAccounting?.noteWindowFlush(provider, halt.flushMs);
+        } catch {
+          // ignore accounting failures
+        }
+      }
+      return quotaHaltCooldownTtlMs(halt.flushMs);
+    }
+    return this.parseRetryAfterMs(response.headers.get('retry-after'));
   }
 
   private evictExpiredRateLimitCooldowns(now = Date.now()): void {

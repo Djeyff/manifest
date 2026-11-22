@@ -37,6 +37,7 @@ import { inferProviderFromModel } from '../../common/utils/provider-inference';
 import { TtlCache } from '../../common/utils/ttl-cache';
 import { ManifestRequest } from '../../entities/request.entity';
 import { HeaderTier } from '../../entities/header-tier.entity';
+import { Wallet } from '../../entities/wallet.entity';
 
 // The Messages-log "failed"/"errors" filters and every "messages" KPI count
 // share one definition of an error status (see query-helpers.sqlCountMessages).
@@ -135,6 +136,14 @@ interface MessageQueryParams extends MessageFilterParams {
   routing_tier?: string;
   specificity_category?: string;
   header_tier_id?: string;
+  /**
+   * Wallet ids (the `wallets` table PKs), OR'd together: a request matches
+   * when any of its provider attempts was served by a key that belongs to
+   * one of these wallets — the same "any attempt" rule the other attempt
+   * facets follow, so a fallback leg paid by the selected wallet still
+   * surfaces the request it belongs to.
+   */
+  wallets?: string[];
   include_total?: boolean;
   /** Allow a recent exact total to be reused instead of forcing a fresh first-page count. */
   cache_total?: boolean;
@@ -195,6 +204,14 @@ export interface HeaderTierFilterOption {
   ids: string[];
 }
 
+/** A wallet as the Requests Wallet filter offers it (the `wallets` row). */
+export interface WalletFilterOption {
+  id: string;
+  name: string;
+  /** The owner's color tag: a palette token ('indigo') or a hex color. */
+  color: string;
+}
+
 /**
  * One Tier-filter option can cover the same custom tier defined on several
  * harnesses, so `header_tier_id` accepts a comma-separated list of ids. A
@@ -216,9 +233,10 @@ function emptyFilterOptions(): {
   providers: string[];
   provider_labels: Record<string, string>;
   header_tiers: HeaderTierFilterOption[];
+  wallets: WalletFilterOption[];
   models: string[];
 } {
-  return { providers: [], provider_labels: {}, header_tiers: [], models: [] };
+  return { providers: [], provider_labels: {}, header_tiers: [], wallets: [], models: [] };
 }
 
 @Injectable()
@@ -254,6 +272,9 @@ export class MessagesQueryService {
     @Optional()
     @InjectRepository(HeaderTier)
     private readonly headerTierRepo?: Repository<HeaderTier>,
+    @Optional()
+    @InjectRepository(Wallet)
+    private readonly walletRepo?: Repository<Wallet>,
   ) {}
 
   async getMessages(params: MessageQueryParams) {
@@ -324,6 +345,7 @@ export class MessagesQueryService {
       providers: filterOptions.providers,
       provider_labels: filterOptions.provider_labels,
       header_tiers: filterOptions.header_tiers,
+      wallets: filterOptions.wallets,
       models: filterOptions.models,
     };
   }
@@ -428,6 +450,18 @@ export class MessagesQueryService {
     if (requestHeaderTierIds.length) {
       attemptPredicates.push('filtered_attempt.header_tier_id IN (:...requestHeaderTiers)');
       attemptParameters['requestHeaderTiers'] = requestHeaderTierIds;
+    }
+    if (params.wallets?.length) {
+      // The wallet that SERVED the attempt (RET-697): the attempt's key is a
+      // wallet member. wallet ids are uuid PKs, so the id list alone scopes the
+      // subquery; an attempt with no stamped connection (NULL
+      // tenant_provider_id) can never match, which mirrors its "—" chip.
+      attemptPredicates.push(`EXISTS (
+        SELECT 1 FROM wallet_members wallet_member
+        WHERE wallet_member.tenant_provider_id = filtered_attempt.tenant_provider_id
+          AND wallet_member.wallet_id IN (:...requestWallets)
+      )`);
+      attemptParameters['requestWallets'] = params.wallets;
     }
     if (params.triggers?.length) {
       // Several recovery-attempt kinds OR together (a multiselect facet). When
@@ -731,6 +765,7 @@ export class MessagesQueryService {
       providers: filterOptions.providers,
       provider_labels: filterOptions.provider_labels,
       header_tiers: filterOptions.header_tiers,
+      wallets: filterOptions.wallets,
       models: filterOptions.models,
     };
   }
@@ -790,6 +825,7 @@ export class MessagesQueryService {
     providers: string[];
     provider_labels: Record<string, string>;
     header_tiers: HeaderTierFilterOption[];
+    wallets: WalletFilterOption[];
     models: string[];
   }> {
     params = {
@@ -798,9 +834,10 @@ export class MessagesQueryService {
         params.agentScope ??
         (await this.analyticsScope.resolve(params.tenantId, params.agent_name)),
     };
-    const [distinctRows, headerTiers] = await Promise.all([
+    const [distinctRows, headerTiers, walletOptions] = await Promise.all([
       this.getDistinctModels(params.tenantId, params.range, params.agentScope),
       this.getHeaderTierOptions(params.tenantId, params.agentScope),
+      this.getWalletOptions(params.tenantId),
     ]);
     const providers = this.deriveProviders(distinctRows.models, distinctRows.providers);
     const providerLabels = await this.resolveCustomProviderLabels(providers, params.tenantId);
@@ -815,6 +852,7 @@ export class MessagesQueryService {
       providers,
       provider_labels: providerLabels,
       header_tiers: headerTiers,
+      wallets: walletOptions,
       models,
     };
   }
@@ -849,6 +887,33 @@ export class MessagesQueryService {
       else byName.set(row.name.toLowerCase(), { name: row.name, ids: [row.id] });
     }
     return [...byName.values()];
+  }
+
+  /**
+   * Wallets the Wallet filter can offer: the caller tenant's `wallets` rows
+   * with their color tags, name-sorted case-insensitively. Wallets are
+   * tenant-scoped groups of provider keys, so the list is the same whether or
+   * not a harness is picked — a wallet can serve several harnesses' keys.
+   * Deleted wallets drop out; requests they once served lose their chip in
+   * the log too, so the dropdown staying in sync with the column is correct.
+   */
+  private async getWalletOptions(tenantId: string | null): Promise<WalletFilterOption[]> {
+    if (!tenantId || !this.walletRepo) return [];
+    const qb = this.walletRepo
+      .createQueryBuilder('w')
+      .select('w.id', 'id')
+      .addSelect('w.name', 'name')
+      .addSelect('w.color', 'color')
+      .where('w.tenant_id = :tenantId', { tenantId })
+      .orderBy('LOWER(w.name)', 'ASC');
+    const rows = await qb.getRawMany<{ id: string; name: string; color: string }>();
+    // `color` defaults to 'indigo' at the DB level, but an empty legacy row
+    // should not render as an empty chip — fall through to the entity default.
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      color: row.color?.trim() || 'indigo',
+    }));
   }
 
   /**
@@ -889,6 +954,7 @@ export class MessagesQueryService {
     routing_tier?: string;
     specificity_category?: string;
     header_tier_id?: string;
+    wallets?: string[];
   }): Promise<SelectQueryBuilder<AgentMessage>> {
     const cutoff = params.range ? computeCutoff(rangeToInterval(params.range)) : undefined;
     const qb = this.turnRepo.createQueryBuilder('at');
@@ -945,6 +1011,19 @@ export class MessagesQueryService {
       qb.andWhere('at.header_tier_id IN (:...headerTierFilter)', {
         headerTierFilter: headerTierIds,
       });
+    }
+
+    if (params.wallets?.length) {
+      // Unlinked-attempt compatibility branch: the attempt IS the row, so the
+      // same wallet-membership lookup runs against `at` directly.
+      qb.andWhere(
+        `EXISTS (
+          SELECT 1 FROM wallet_members legacy_wallet_member
+          WHERE legacy_wallet_member.tenant_provider_id = at.tenant_provider_id
+            AND legacy_wallet_member.wallet_id IN (:...legacyWallets)
+        )`,
+        { legacyWallets: params.wallets },
+      );
     }
 
     if (params.provider) {

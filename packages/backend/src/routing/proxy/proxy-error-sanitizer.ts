@@ -1,4 +1,5 @@
 import { scrubSecrets } from '../../common/utils/secret-scrub';
+import { QUOTA_HALT_CODES } from './quota-halt';
 
 const KNOWN_ERROR_MESSAGES: Record<number, string> = {
   400: 'Bad request to upstream provider',
@@ -243,4 +244,106 @@ export function normalizeProviderErrorForStorage(
   rawBody: string,
 ): string {
   return htmlEndpointError(status, rawBody) ?? rawBody;
+}
+
+/** Stable per-code classification for upstream refusal walls (RET-590 / D-2026-11-07-03 item2). */
+export type UpstreamErrorKind = 'wallet' | 'plan_gate' | 'quota_window' | 'rate_limit' | 'server';
+
+export interface UpstreamErrorHint {
+  kind: UpstreamErrorKind;
+  hint: string;
+  retryable: boolean;
+}
+
+const QUOTA_WINDOW_HINT: UpstreamErrorHint = {
+  kind: 'quota_window',
+  retryable: true,
+  hint: 'Provider quota window exhausted — honor Retry-After and retry after the window flushes; immediate retries fail.',
+};
+const RATE_LIMIT_HINT: UpstreamErrorHint = {
+  kind: 'rate_limit',
+  retryable: true,
+  hint: 'Provider rate limit — retry with backoff.',
+};
+const SERVER_HINT: UpstreamErrorHint = {
+  kind: 'server',
+  retryable: true,
+  hint: 'Upstream provider server error — retry with backoff.',
+};
+
+const UPSTREAM_CODE_HINTS: ReadonlyMap<number, UpstreamErrorHint> = new Map([
+  [
+    1113,
+    {
+      kind: 'wallet',
+      retryable: false,
+      hint: 'Provider account wallet/plan does not cover this model — route away or fund the account; retries fail until funded.',
+    },
+  ],
+  [
+    1311,
+    {
+      kind: 'plan_gate',
+      retryable: false,
+      hint: 'Provider plan does not include this model — route to a covered model; retries fail.',
+    },
+  ],
+  [
+    1302,
+    {
+      kind: 'rate_limit',
+      retryable: true,
+      hint: 'Provider concurrency limit hit — retry with backoff.',
+    },
+  ],
+  [
+    1305,
+    { kind: 'rate_limit', retryable: true, hint: 'Provider rate limit hit — retry with backoff.' },
+  ],
+]);
+
+/**
+ * Numeric upstream refusal code (top-level `code` or nested `error.code`),
+ * numeric or numeric-string — the zai dialect. String codes (OpenAI dialect)
+ * already flow through the structured parse; only numeric codes surface here.
+ */
+export function extractUpstreamCode(rawBody: string): string | null {
+  try {
+    const parsed = JSON.parse(rawBody) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const root = parsed as Record<string, unknown>;
+    const err =
+      root.error !== null && typeof root.error === 'object' && !Array.isArray(root.error)
+        ? (root.error as Record<string, unknown>)
+        : undefined;
+    const value = root.code ?? err?.code;
+    const n =
+      typeof value === 'number'
+        ? value
+        : typeof value === 'string' && value.trim() !== ''
+          ? Number(value.trim())
+          : Number.NaN;
+    return Number.isFinite(n) ? String(n) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Stable, per-code hint for an upstream refusal (RET-590): wallet/plan-gate
+ * walls are not retryable; quota windows are retryable after the flush; plain
+ * 429/5xx get status-derived classes. Null for non-wall statuses with no code.
+ */
+export function classifyUpstreamHint(status: number, rawBody: string): UpstreamErrorHint | null {
+  if (status < 400) return null;
+  const code = extractUpstreamCode(rawBody);
+  if (code !== null) {
+    const n = Number(code);
+    const mapped = UPSTREAM_CODE_HINTS.get(n);
+    if (mapped) return mapped;
+    if (QUOTA_HALT_CODES.has(n)) return QUOTA_WINDOW_HINT;
+  }
+  if (status === 429) return RATE_LIMIT_HINT;
+  if (status >= 500) return SERVER_HINT;
+  return null;
 }

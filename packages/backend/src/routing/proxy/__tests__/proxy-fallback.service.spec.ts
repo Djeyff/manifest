@@ -1,3 +1,4 @@
+import './stream-warmup-test-env';
 import { Logger } from '@nestjs/common';
 import { Repository } from 'typeorm';
 import { ProxyFallbackService, normalizeProviderModel } from '../proxy-fallback.service';
@@ -20,8 +21,11 @@ import { ProviderParamSpecService } from '../../routing-core/provider-param-spec
 import { AutofixService } from '../../autofix/autofix.service';
 import { getProviderParamSpecs, type ProviderParamSpecCatalog } from 'manifest-shared';
 
-// A short warm-up window keeps the stalled-stream fallback tests fast. Only
-// the fallback chain reads it here; peekStream itself is the real one.
+// A short warm-up window keeps the stalled-stream fallback tests fast and
+// deterministic. The window itself is pinned by the first import above
+// (stream-warmup-test-env.ts), because peekStream's default timeout binds to
+// the 15s const inside stream-warmup's own module scope and cannot be
+// changed by re-exporting a different STREAM_WARMUP_MS here.
 jest.mock('../stream-warmup', () => ({
   ...jest.requireActual('../stream-warmup'),
   STREAM_WARMUP_MS: 50,
@@ -3306,4 +3310,11 @@ describe('ProxyFallbackService', () => {
       expect(callArg.providerResource).toBeUndefined();
     });
   });
+});
+
+afterAll(() => {
+  // stream-warmup captured the 50ms window at import time (first import
+  // above); clear the env so a reused jest worker's next spec file reads
+  // its own default.
+  delete process.env.STREAM_WARMUP_MS;
 });

@@ -24,6 +24,7 @@ import { authBadgeFor } from './AuthBadge.js';
 import { providerIcon, customProviderLogo } from './ProviderIcon.js';
 import ModelParamsAffordance from './ModelParamsAffordance.jsx';
 import RouteKeyChip from './RouteKeyChip.js';
+import { useWalletOptions, walletOptionsForProvider } from '../services/api/wallet-options.js';
 import { modelParamsScopeForTier } from 'manifest-shared';
 
 interface FallbackListProps {
@@ -105,6 +106,7 @@ const FallbackUndoIcon: Component<{ size: 20 | 16; class?: string }> = (p) => (
 );
 
 const FallbackList: Component<FallbackListProps> = (props) => {
+  const allWallets = useWalletOptions();
   const [removingIndex, setRemovingIndex] = createSignal<number | null>(null);
   const [dragIndex, setDragIndex] = createSignal<number | null>(null);
   const [dropSlot, setDropSlot] = createSignal<number | null>(null);
@@ -419,6 +421,9 @@ const FallbackList: Component<FallbackListProps> = (props) => {
               const auth = () => authTypeFor(provId(), i());
               const title = () => providerTitle(provId(), auth());
               const keys = () => keysForFallback(provId(), auth());
+              // Wallets that can serve this row's provider (owner order
+              // D-2026-11-22-11): the dropdown offers wallets, not providers.
+              const walletsFor = () => walletOptionsForProvider(allWallets(), provId());
               return (
                 <>
                   <div
@@ -511,9 +516,10 @@ const FallbackList: Component<FallbackListProps> = (props) => {
                       <Show when={skippedInStream(model(), i())}>
                         <span class="routing-card__skipped-badge">Skipped in Stream</span>
                       </Show>
-                      <Show when={keys().length > 1}>
+                      <Show when={walletsFor().length > 1 || keys().length > 1}>
                         <RouteKeyChip
                           keys={keys()}
+                          wallets={walletsFor}
                           currentLabel={pinnedLabel() ?? undefined}
                           modelLabel={modelLabel(model())}
                           usedLabels={() =>

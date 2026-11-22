@@ -131,10 +131,15 @@ function sanitizeSchema(schema: unknown, isPropertiesMap = false): unknown {
 
 function safeParseArgs(args: string | undefined): Record<string, unknown> {
   try {
-    return JSON.parse(args || '{}') as Record<string, unknown>;
+    // JSON.parse('null') and JSON.parse('[]') succeed, but Gemini functionCall
+    // args must be a Struct. A no-arg tool echoed as the string "null" would
+    // otherwise be forwarded as args: null and rejected.
+    const parsed: unknown = JSON.parse(args || '{}');
+    if (isRecord(parsed)) return parsed;
   } catch {
-    return {};
+    // Malformed arguments are an empty object, same as a missing payload.
   }
+  return {};
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -430,6 +435,7 @@ export function toGoogleRequest(
   if (maxTokens !== undefined) genConfig.maxOutputTokens = maxTokens;
   if (body.temperature !== undefined) genConfig.temperature = body.temperature;
   if (body.top_p !== undefined) genConfig.topP = body.top_p;
+  if (body.seed !== undefined) genConfig.seed = body.seed;
   // chat_completions `stop` accepts a string or string[]; Gemini
   // `stopSequences` is always an array. An explicit empty `stop` ([] or '')
   // means "no stop sequences", so it also clears native ones.
@@ -456,12 +462,26 @@ export function fromGoogleResponse(
   const candidate = candidates[0];
 
   if (!candidate) {
+    // A prompt rejected up front comes back with `promptFeedback.blockReason`
+    // and no candidates. Surface it as a content_filter finish rather than an
+    // empty `choices` array, and keep the usage Google still reports.
+    const blocked = hasPromptBlock(googleResp);
+    const blockedUsage = googleResp.usageMetadata as Record<string, number> | undefined;
     return {
       id: `chatcmpl-${randomUUID()}`,
       object: 'chat.completion',
       created: Math.floor(Date.now() / 1000),
       model,
-      choices: [],
+      choices: blocked
+        ? [
+            {
+              index: 0,
+              message: { role: 'assistant', content: null },
+              finish_reason: 'content_filter',
+            },
+          ]
+        : [],
+      ...(blockedUsage ? { usage: toChatUsage(blockedUsage) } : {}),
     };
   }
 
@@ -486,7 +506,7 @@ export function fromGoogleResponse(
       const toolCall: Record<string, unknown> = {
         id: toolCallId,
         type: 'function',
-        function: { name: fc.name, arguments: JSON.stringify(fc.args) },
+        function: { name: fc.name, arguments: JSON.stringify(fc.args ?? {}) },
       };
       const sig = part.thoughtSignature;
       if (typeof sig === 'string' && sig) {
@@ -535,6 +555,11 @@ function toChatUsage(usage: Record<string, number>): Record<string, unknown> {
   };
 }
 
+function hasPromptBlock(data: Record<string, unknown>): boolean {
+  const feedback = data.promptFeedback as { blockReason?: unknown } | undefined;
+  return Boolean(feedback?.blockReason);
+}
+
 function mapFinishReason(candidate: Record<string, unknown>, hasToolCalls = false): string {
   const reason = candidate.finishReason as string | undefined;
   if (!reason || reason === 'STOP') {
@@ -544,6 +569,10 @@ function mapFinishReason(candidate: Record<string, unknown>, hasToolCalls = fals
     MAX_TOKENS: 'length',
     SAFETY: 'content_filter',
     RECITATION: 'content_filter',
+    BLOCKLIST: 'content_filter',
+    PROHIBITED_CONTENT: 'content_filter',
+    SPII: 'content_filter',
+    IMAGE_SAFETY: 'content_filter',
   };
   return map[reason] ?? 'stop';
 }
@@ -658,11 +687,15 @@ export function transformGoogleStreamChunk(
   // candidate) closes the stream; its usage is the total.
   const usage = data.usageMetadata as Record<string, number> | undefined;
   if (usage) state.usage = usage;
-  const isTerminal = Boolean(candidate?.finishReason) || (Boolean(usage) && !candidate);
+  const promptBlocked = !candidate && hasPromptBlock(data);
+  const isTerminal =
+    Boolean(candidate?.finishReason) || (Boolean(usage) && !candidate) || promptBlocked;
   if (isTerminal) {
     if (!state.finished) {
       state.finished = true;
-      const finishReason = mapFinishReason(candidate ?? {}, state.toolCallCount > 0);
+      const finishReason = promptBlocked
+        ? 'content_filter'
+        : mapFinishReason(candidate ?? {}, state.toolCallCount > 0);
       result += `data: ${JSON.stringify({
         id: state.id,
         object: 'chat.completion.chunk',

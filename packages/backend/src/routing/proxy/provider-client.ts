@@ -2,12 +2,7 @@ import { createHash } from 'crypto';
 import { HttpStatus, Injectable, Logger, Optional } from '@nestjs/common';
 import { OPENAI_RESPONSES_ONLY_RE, stripVendorPrefix } from '../../common/constants/openai-models';
 import { XAI_RESPONSES_ONLY_RE } from '../../common/constants/xai-models';
-import {
-  PROVIDER_ENDPOINTS,
-  ProviderEndpoint,
-  resolveBedrockEndpointKey,
-  resolveEndpointKey,
-} from './provider-endpoints';
+import { PROVIDER_ENDPOINTS, ProviderEndpoint, buildEndpointOverride, resolveBedrockEndpointKey, resolveEndpointKey } from './provider-endpoints';
 import { validatePublicUrl } from '../../common/utils/url-validation';
 import { isSelfHosted } from '../../common/utils/detect-self-hosted';
 import { resolveSubscriptionEndpointKey } from './provider-hooks';
@@ -50,7 +45,11 @@ import { isProviderAvailableForDeployment } from '../../common/utils/provider-av
 import { ManifestError } from '../../common/errors/manifest-error';
 import { MANAGED_FREE_PROVIDER_BY_ID } from '../../common/constants/managed-free-providers';
 import { isBedrockProvider } from '../bedrock-region';
-import { getBedrockRuntimeCapabilities } from '../bedrock-runtime-capabilities';
+import {
+  bedrockRuntimeChatNeedsResponses,
+  getBedrockRuntimeCapabilities,
+} from '../bedrock-runtime-capabilities';
+import { QuotaAccountingService } from './quota-accounting.service';
 
 export interface ForwardResult {
   response: Response;
@@ -184,26 +183,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function hasChatCompletionOutput(message: Record<string, unknown>): boolean {
-  return Object.entries(message).some(([key, value]) => {
-    if (key === 'role' || value == null) return false;
-    if (typeof value === 'string' || Array.isArray(value)) return value.length > 0;
-    return true;
-  });
-}
-
-function isEmptyChatCompletion(body: unknown): boolean {
-  if (!isRecord(body) || !Array.isArray(body.choices)) return false;
-  return body.choices.every(
-    (choice) =>
-      isRecord(choice) &&
-      choice.finish_reason === 'stop' &&
-      isRecord(choice.message) &&
-      !hasChatCompletionOutput(choice.message),
-  );
-}
-
-async function qualifyEmptyChatCompletion(
+/**
+ * A Chat Completions reply with no choice at all carries no answer and breaks
+ * SDKs that read `choices[0]`, so it fails like a provider error. A choice with
+ * empty content is a valid answer and passes through (#3128).
+ */
+async function rejectChoicelessChatCompletion(
   response: Response,
   attempt?: ProviderAttemptRef,
 ): Promise<Response> {
@@ -215,15 +200,17 @@ async function qualifyEmptyChatCompletion(
   } catch {
     return response;
   }
-  if (!isEmptyChatCompletion(body)) return response;
+  if (!isRecord(body) || !Array.isArray(body.choices) || body.choices.length > 0) {
+    return response;
+  }
   await attempt?.finishRecording?.({ type: 'json', body });
 
   return new Response(
     JSON.stringify({
       error: {
-        message: 'Upstream provider returned an empty Chat Completions response',
+        message: 'Upstream provider returned a Chat Completions response without choices',
         type: 'server_error',
-        code: 'empty_response',
+        code: 'malformed_response',
       },
     }),
     { status: HttpStatus.BAD_GATEWAY, headers: { 'content-type': 'application/json' } },
@@ -313,6 +300,22 @@ function applyAnthropicThinkingForOpenAi(
   }
 }
 
+// MiniMax M3.x runs adaptive thinking only. The upstream rejects
+// `reasoning_effort: none` with error 2013 ("requires adaptive thinking;
+// reasoning effort none is not allowed"), so a leg that arrives with the
+// tier `none` must never forward it. `none` is rewritten to `low`, the
+// minimum tier MiniMax accepts, so the leg stays legal while the provider
+// keeps its adaptive thinking on. Every other tier (low/medium/high)
+// is legal and passes through unchanged.
+//
+// This applies to EVERY MiniMax leg, primary or fallback: the effort travels
+// in the shared client body, so a zai/GLM primary that carries `none` would
+// otherwise poison the MiniMax fallback leg.
+function minimaxReasoningEffort(effort: unknown): string | undefined {
+  if (typeof effort !== 'string' || effort.length === 0) return undefined;
+  return effort === 'none' ? 'low' : effort;
+}
+
 function openRouterCacheMode(model: string): 'anthropic' | 'message' | null {
   const normalized = model.toLowerCase().replace(/^~/, '');
   if (normalized.startsWith('anthropic/')) return 'anthropic';
@@ -365,6 +368,8 @@ export class ProviderClient {
     codexAffinity?: CodexSessionAffinity,
     @Optional()
     private readonly reasoningCatalog?: ModelsDevReasoningCatalog,
+    @Optional()
+    private readonly quotaAccounting?: QuotaAccountingService,
   ) {
     this.codexAffinity = codexAffinity ?? new CodexSessionAffinity();
   }
@@ -397,6 +402,7 @@ export class ProviderClient {
       authType,
       model,
       opts.apiMode,
+      body,
     );
     const isGoogle = endpoint.format === 'google';
     const isAnthropic = endpoint.format === 'anthropic';
@@ -497,21 +503,29 @@ export class ProviderClient {
         }
       }
 
-      const result = await this.executeFetch(url, finalHeaders, wireRequestBody, signal, stream, {
-        isGoogle,
-        isAnthropic,
-        isChatGpt,
-        isResponses,
-        isCodeAssist,
-        responsesTextFormat: textFormat,
-        responsesToolNames:
-          opts.apiMode === 'responses' ? responsesToolNames(body.tools) : undefined,
-      });
+      const result = await this.executeFetch(
+        url,
+        finalHeaders,
+        wireRequestBody,
+        signal,
+        stream,
+        {
+          isGoogle,
+          isAnthropic,
+          isChatGpt,
+          isResponses,
+          isCodeAssist,
+          responsesTextFormat: textFormat,
+          responsesToolNames:
+            opts.apiMode === 'responses' ? responsesToolNames(body.tools) : undefined,
+        },
+        opts.provider,
+      );
       const response =
         !stream &&
         endpoint.format === 'openai' &&
         (opts.apiMode === undefined || opts.apiMode === 'chat_completions')
-          ? await qualifyEmptyChatCompletion(result.response, attempt)
+          ? await rejectChoicelessChatCompletion(result.response, attempt)
           : result.response;
       const qualifiedResult =
         endpointKey === 'openai-subscription'
@@ -548,9 +562,25 @@ export class ProviderClient {
     authType: string | undefined,
     model: string,
     apiMode: ForwardOptions['apiMode'],
+    body: Record<string, unknown>,
   ): Promise<{ endpoint: ProviderEndpoint; endpointKey: string }> {
+    // Runtime Chat Completions rejects function tools next to reasoning on GPT
+    // profiles, so those chat requests go to Runtime Responses instead
+    // (mnfst/llm-gateway#3107). `BEDROCK_RUNTIME_CHAT_VIA_RESPONSES=false` turns it off.
+    const viaResponses =
+      isBedrockProvider(provider) &&
+      (apiMode === undefined || apiMode === 'chat_completions') &&
+      process.env.BEDROCK_RUNTIME_CHAT_VIA_RESPONSES !== 'false' &&
+      bedrockRuntimeChatNeedsResponses(model, body);
     if (customEndpoint) {
-      return { endpoint: customEndpoint, endpointKey: 'custom' };
+      // A stored-region connection arrives as the Runtime chat override.
+      return {
+        endpoint:
+          viaResponses && customEndpoint.format === 'openai'
+            ? buildEndpointOverride(customEndpoint.baseUrl, 'bedrock-runtime-responses')
+            : customEndpoint,
+        endpointKey: 'custom',
+      };
     }
     let resolved = resolveEndpointKey(provider);
     if (!resolved) {
@@ -561,7 +591,7 @@ export class ProviderClient {
       if (override) resolved = override;
     }
     if (resolved === 'bedrock') {
-      resolved = resolveBedrockEndpointKey(model, apiMode);
+      resolved = resolveBedrockEndpointKey(model, viaResponses ? 'responses' : apiMode);
     }
     if (resolved === 'qwen-subscription') {
       const bareQwenModel = stripVendorPrefix(model);
@@ -768,12 +798,35 @@ export class ProviderClient {
             });
       // MiniMax's Messages API takes effort as `output_config.effort`. Matched by
       // provider, not endpoint key, so the CN override (`custom`) is covered.
-      if (isMinimax && requestSource.reasoning_effort !== undefined) {
-        const outputConfig = (requestBody.output_config ?? {}) as Record<string, unknown>;
-        requestBody.output_config = {
-          effort: requestSource.reasoning_effort,
-          ...outputConfig,
-        };
+      //
+      // MiniMax M3.x runs adaptive thinking only: `none` is rejected upstream
+      // with 2013 ("requires adaptive thinking; reasoning effort none is not
+      // allowed"). Strip `none` so the provider applies its adaptive-thinking
+      // default; low/medium/high are legal and pass through unchanged.
+      const nativeOutputConfig = (requestBody.output_config ?? {}) as Record<string, unknown>;
+      if (
+        isMinimax &&
+        (requestSource.reasoning_effort !== undefined || nativeOutputConfig.effort !== undefined)
+      ) {
+        const outputConfig = { ...nativeOutputConfig };
+        // A native `output_config.effort` is the caller's explicit tier and
+        // wins over the shared body tier; both must be legal for MiniMax.
+        const requested =
+          typeof outputConfig.effort === 'string'
+            ? outputConfig.effort
+            : requestSource.reasoning_effort;
+        const effort = minimaxReasoningEffort(requested);
+        if (effort !== undefined) {
+          outputConfig.effort = effort;
+          requestBody.output_config = outputConfig;
+        } else {
+          delete outputConfig.effort;
+          if (Object.keys(outputConfig).length > 0) {
+            requestBody.output_config = outputConfig;
+          } else {
+            delete requestBody.output_config;
+          }
+        }
         delete requestBody.reasoning_effort;
       }
       requestBody.model = bareModel;
@@ -845,10 +898,12 @@ export class ProviderClient {
                 endpointKey === 'openai-subscription' ||
                 endpointKey === 'openai-responses' ||
                 endpointKey === 'xai-responses',
-              // Only OpenAI infrastructure is known to accept
-              // reasoning.summary; other Responses backends may 400 on it.
+              // Only OpenAI infrastructure and Bedrock Runtime are known to
+              // accept reasoning.summary; other Responses backends may 400 on it.
               mapReasoningEffort:
-                endpointKey === 'openai-subscription' || endpointKey === 'openai-responses',
+                endpointKey === 'openai-subscription' ||
+                endpointKey === 'openai-responses' ||
+                endpoint.acceptsReasoningSummary,
             });
       if (endpointKey === 'xai-responses' || endpoint.acceptsPromptCacheKey) {
         applyHashedPromptCacheKey(requestBody, ctx.providerCacheKey);
@@ -902,6 +957,15 @@ export class ProviderClient {
       forwardReasoningEffort: isBedrockRuntimeGpt,
       keepReasoningEffort: isMinimax,
     });
+    // MiniMax M3.x is adaptive-thinking only: `reasoning_effort: none` is
+    // rejected upstream with 2013. Strip it on the OpenAI-compatible leg too
+    // (the CN `custom` override), so a primary or fallback MiniMax leg never
+    // carries an illegal tier.
+    if (isMinimax && sanitized.reasoning_effort !== undefined) {
+      const effort = minimaxReasoningEffort(sanitized.reasoning_effort);
+      if (effort === undefined) delete sanitized.reasoning_effort;
+      else sanitized.reasoning_effort = effort;
+    }
     if (stream && endpoint.streamUsageReporting === 'openai_stream_options') {
       const existing =
         typeof sanitized.stream_options === 'object' && sanitized.stream_options !== null
@@ -966,6 +1030,7 @@ export class ProviderClient {
       responsesTextFormat?: Record<string, unknown>;
       responsesToolNames?: ResponsesToolNames;
     },
+    provider: string,
   ): Promise<ForwardResult> {
     let fetchSignal: AbortSignal;
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -986,11 +1051,22 @@ export class ProviderClient {
     }
 
     let response: Response;
+    // Serialize ONCE: the accounting hook must observe the exact bytes the
+    // fetch sends (model + stream already folded into requestBody upstream).
+    const wireBody = JSON.stringify(requestBody);
+    // Attempted-request accounting (RET-480-B2): counted BEFORE the fetch, so
+    // retries and timeouts count as attempts. Optional-injected and guarded —
+    // telemetry can never break forwarding.
+    try {
+      this.quotaAccounting?.recordAttempt(provider, wireBody);
+    } catch {
+      // accounting failures must never break the forward
+    }
     try {
       response = await fetch(url, {
         method: 'POST',
         headers,
-        body: JSON.stringify(requestBody),
+        body: wireBody,
         signal: fetchSignal,
         // Block redirect-based SSRF escalation: a hostile upstream could 302
         // to a private/metadata endpoint after our pre-fetch validation.

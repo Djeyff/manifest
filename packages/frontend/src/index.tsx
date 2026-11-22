@@ -51,6 +51,13 @@ const ConnectionDetail = lazyReload(() => import('./pages/providers/ConnectionDe
 const McpServer = lazyReload(() => import('./pages/integrations/McpServer.jsx'));
 const Cli = lazyReload(() => import('./pages/integrations/Cli.jsx'));
 
+// Owner-only wallet console (RET-721). Lazily loaded so the console markup
+// never lands in the public initial chunk; the real gate is server-side
+// (owner = tenants.owner_user_id === session user id) on every API call.
+const WalletSettings = lazyReload(() => import('./pages/WalletSettings.jsx'));
+const LoadBalancer = lazyReload(() => import('./pages/LoadBalancer.jsx'));
+const DailyProgress = lazyReload(() => import('./pages/DailyProgress.jsx'));
+
 const GuestLayout: ParentComponent = (props) => (
   <GuestGuard>
     <AuthLayout>{props.children}</AuthLayout>
@@ -144,6 +151,14 @@ render(
 
           <Route path="/connect-provider" component={ConnectProvider} />
           <Route path="/account" component={Account} />
+
+          {/* Owner-only wallet console (RET-721). */}
+          <Route path="/wallets">
+            <Route path="/" component={WalletSettings} />
+            <Route path="/settings" component={WalletSettings} />
+            <Route path="/balancer" component={LoadBalancer} />
+            <Route path="/progress" component={DailyProgress} />
+          </Route>
         </Route>
         <Route path="/upgrade" component={AuthGuard}>
           <Route path="/" component={Upgrade} />

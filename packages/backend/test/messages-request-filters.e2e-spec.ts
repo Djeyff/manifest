@@ -3,6 +3,7 @@ import { DataSource } from 'typeorm';
 import { v4 as uuid } from 'uuid';
 import request from 'supertest';
 import { createTestApp, TEST_API_KEY, TEST_TENANT_ID } from './helpers';
+import { encrypt, getEncryptionSecret } from '../src/common/utils/crypto.util';
 
 /**
  * Filters on the request-first Requests log, end to end.
@@ -24,10 +25,21 @@ type Attempt = {
   status: string;
   fallbackFrom?: string;
   autofix?: boolean;
+  /** The tenant_providers row that served this hop (the Wallet filter's join key). */
+  keyId?: string;
 };
 
 let app: INestApplication;
 const seeded: Record<string, string> = {};
+
+// RET-697 wallet fixtures: two provider keys — one owned by the MAIN wallet,
+// one belonging to no wallet — so the Wallet filter can be exercised on top of
+// the shared request pool without touching any other case's expected arrays
+// (the wallet predicate only runs when `wallet=` is on the query).
+const KEY_MAIN_ID = 'up-wallet-main-key';
+const KEY_SOLO_ID = 'up-wallet-solo-key';
+const WALLET_MAIN_ID = 'wallet-filter-main';
+const WALLET_SPARE_ID = 'wallet-filter-spare';
 
 /**
  * Local wall-clock, the way the gateway writes `timestamp` columns and computes
@@ -74,8 +86,8 @@ async function seedRequest(
   );
   for (const [index, attempt] of opts.attempts.entries()) {
     await ds.query(
-      `INSERT INTO agent_messages (id, request_id, attempt_number, tenant_id, agent_id, agent_name, user_id, timestamp, status, provider, model, fallback_from_model, autofix_applied, input_tokens, output_tokens, service_type)
-       VALUES ($1, $2, $3, $4, $5, $6, 'test-user-001', $7, $8, $9, $10, $11, $12, 10, 5, 'agent')`,
+      `INSERT INTO agent_messages (id, request_id, attempt_number, tenant_id, agent_id, agent_name, user_id, timestamp, status, provider, model, fallback_from_model, autofix_applied, input_tokens, output_tokens, service_type, tenant_provider_id)
+       VALUES ($1, $2, $3, $4, $5, $6, 'test-user-001', $7, $8, $9, $10, $11, $12, 10, 5, 'agent', $13)`,
       [
         uuid(),
         id,
@@ -90,6 +102,7 @@ async function seedRequest(
         attempt.model,
         attempt.fallbackFrom ?? null,
         attempt.autofix ?? false,
+        attempt.keyId ?? null,
       ],
     );
   }
@@ -164,6 +177,45 @@ beforeAll(async () => {
       { provider: 'openai', model: 'probe-a', status: 'success', fallbackFrom: 'probe-b' },
     ],
   });
+
+  // RET-697: provider keys + the MAIN wallet that owns the main key. `failed`
+  // and `blocked` stay walletless so the filter's negative cases are real rows.
+  const secret = getEncryptionSecret();
+  const enc = (s: string) => encrypt(s, secret);
+  for (const [id, prefix] of [
+    [KEY_MAIN_ID, 'sk-main'],
+    [KEY_SOLO_ID, 'sk-solo'],
+  ]) {
+    await ds.query(
+      `INSERT INTO tenant_providers
+         (id, tenant_id, created_by_user_id, agent_id, provider, auth_type, api_key_encrypted, is_active, connected_at, updated_at, key_prefix, cached_models)
+       VALUES ($1,$2,'test-user-001',$3,'openai','api_key',$4,true,NOW(),NOW(),$5,'[]')`,
+      [id, TEST_TENANT_ID, HARNESS_ID, enc(`${prefix}-secret`), prefix],
+    );
+  }
+  await ds.query(
+    `INSERT INTO wallets (id, tenant_id, name, color, created_at, updated_at)
+     VALUES ($1,$2,'MAIN','emerald',NOW(),NOW()), ($3,$2,'SPARE','#123abc',NOW(),NOW())`,
+    [WALLET_MAIN_ID, TEST_TENANT_ID, WALLET_SPARE_ID],
+  );
+  await ds.query(
+    `INSERT INTO wallet_members (wallet_id, tenant_provider_id, tenant_id, created_at)
+     VALUES ($1,$2,$3,NOW())`,
+    [WALLET_MAIN_ID, KEY_MAIN_ID, TEST_TENANT_ID],
+  );
+  // Stamp the shared pool: plain + fallback's first hop were served by the MAIN
+  // key; fallback's second hop and `failed` by the walletless key.
+  for (const [requestKey, attemptNumber, keyId] of [
+    ['plain', 1, KEY_MAIN_ID],
+    ['fallback', 1, KEY_MAIN_ID],
+    ['fallback', 2, KEY_SOLO_ID],
+    ['failed', 1, KEY_SOLO_ID],
+  ] as const) {
+    await ds.query(
+      'UPDATE agent_messages SET tenant_provider_id = $1 WHERE request_id = $2 AND attempt_number = $3',
+      [keyId, seeded[requestKey], attemptNumber],
+    );
+  }
 });
 
 afterAll(async () => {
@@ -173,6 +225,14 @@ afterAll(async () => {
     await ds.query('DELETE FROM requests WHERE id = $1', [id]);
   }
   await ds.query('DELETE FROM agents WHERE id IN ($1, $2)', [HARNESS_ID, OTHER_HARNESS_ID]);
+  // Wallet fixtures, members first (FK cascade makes the order optional but
+  // explicit keeps the teardown readable).
+  await ds.query('DELETE FROM wallet_members WHERE wallet_id IN ($1, $2)', [
+    WALLET_MAIN_ID,
+    WALLET_SPARE_ID,
+  ]);
+  await ds.query('DELETE FROM wallets WHERE id IN ($1, $2)', [WALLET_MAIN_ID, WALLET_SPARE_ID]);
+  await ds.query('DELETE FROM tenant_providers WHERE id IN ($1, $2)', [KEY_MAIN_ID, KEY_SOLO_ID]);
   await app.close();
 });
 
@@ -268,5 +328,34 @@ describe('GET /api/v1/messages request filters', () => {
     expect(res.body.models).toEqual(
       expect.arrayContaining(['probe-a', 'probe-b', 'probe-blocked']),
     );
+  });
+
+  describe('wallet filter (RET-697)', () => {
+    // plain + fallback's first hop carry the MAIN wallet's key; fallback's
+    // second hop and `failed` carry a walletless key, so every expectation
+    // below exercises both sides of the wallet_members join.
+    it('matches requests an attempt of which was served by a wallet key', async () => {
+      await expectHarnessWeek(`wallet=${WALLET_MAIN_ID}`, ['plain', 'fallback']);
+    });
+
+    it('composes with the other attempt facets', async () => {
+      await expectHarnessWeek(`wallet=${WALLET_MAIN_ID}&trigger=none`, ['plain']);
+      await expectHarnessWeek(`wallet=${WALLET_MAIN_ID}&trigger=fallback`, ['fallback']);
+      // `failed` was served by the walletless key: its status facet matches,
+      // but the wallet predicate must still exclude it.
+      await expectHarnessWeek(`wallet=${WALLET_MAIN_ID}&status=failed`, []);
+    });
+
+    it('does not match an empty wallet or an unknown id', async () => {
+      await expectHarnessWeek(`wallet=${WALLET_SPARE_ID}`, []);
+      await expectHarnessWeek('wallet=00000000-0000-4000-8000-000000000000', []);
+    });
+
+    it('keeps a walletless attempt out of a wallet match (the "—"-chip rule)', async () => {
+      // A csv of ids ORs together: SPARE has no member keys, so this equals
+      // the MAIN-only query — the walletless second hop of `fallback` must
+      // not smuggle the request into a SPARE-only view either.
+      await expectHarnessWeek(`wallet=${WALLET_MAIN_ID},${WALLET_SPARE_ID}`, ['plain', 'fallback']);
+    });
   });
 });

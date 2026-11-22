@@ -28,3 +28,8 @@ packages/backend/test/
 packages/frontend/tests/
 packages/shared/src/**/*.spec.ts
 packages/backend/src/**/*.spec.ts
+
+# RET-651: host-side jest-rig node_modules (symlinks into the shared rig)
+# must not enter the build context; a bare symlink lands as a FILE and
+# collides with the deps-stage directory during COPY packages/backend.
+**/node_modules

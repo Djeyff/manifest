@@ -163,6 +163,15 @@ export class MessagesQueryDto {
   @IsString()
   header_tier_id?: string;
 
+  /**
+   * Comma-separated wallet ids (the `wallets` table PKs). A request matches
+   * when any of its provider attempts was served by a key that belongs to one
+   * of these wallets — the wallet_members join behind the Wallet column.
+   */
+  @IsOptional()
+  @IsString()
+  wallet?: string;
+
   @IsOptional()
   @IsBoolean()
   @Transform(({ value }) => value === true || value === 'true' || value === '1')
