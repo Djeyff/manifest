@@ -226,4 +226,27 @@ describe('ZaiQuotaService minimax rows (RET-598-FU7-GW)', () => {
     expect(svc.snapshot().labels['RCR MM'].error).toBe('http_429');
     expect(svc.snapshot().labels['CCR'].error).toBeNull(); // other labels keep polling
   });
+
+  it('stamps minimax provenance and marks a window-less 200 as parse_failed_5h', async () => {
+    const { impl } = routingFetchImpl(
+      { status: 200, body: ZAI_OK_BODY },
+      // 200 + ok envelope but the row carries no window fields: shape drift.
+      {
+        status: 200,
+        body: {
+          model_remains: [{ model_name: 'general' }],
+          base_resp: { status_code: 0, status_msg: 'success' },
+        },
+      },
+    );
+    const svc = new ZaiQuotaService(makeRepo([zaiRow(), minimaxRow()]), impl);
+    await svc.tick();
+    const snap = svc.snapshot();
+    expect(snap.labels['RCR MM'].source).toBe('minimax-token-plan');
+    expect(snap.labels['RCR MM'].polled_at).not.toBeNull();
+    expect(snap.labels['RCR MM'].error).toBe('parse_failed_5h');
+    expect(snap.labels['RCR MM'].five_h_pct_left).toBeNull();
+    expect(snap.labels['RCR'].source).toBe('zai-coding-plan');
+    expect(snap.poll_errors).toBe(1);
+  });
 });

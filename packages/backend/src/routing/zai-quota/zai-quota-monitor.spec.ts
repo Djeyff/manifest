@@ -176,6 +176,8 @@ describe('parseZaiQuotaLimitPayload (RET-595)', () => {
       plan_level: null,
       subscription_status: null,
       seen_at: null,
+      polled_at: null,
+      source: null,
       error: null,
     });
   });

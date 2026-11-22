@@ -20,6 +20,12 @@ export const ZAI_MONITOR_QUOTA_PATH = '/api/monitor/usage/quota/limit';
 /** Default monitor base (global region; the coding base carries `/api/coding/...`). */
 export const ZAI_MONITOR_BASE_DEFAULT = 'https://api.z.ai';
 
+/** Feed provenance for z.ai coding-plan labels (RET-500-nodupe). */
+export const ZAI_QUOTA_SOURCE = 'zai-coding-plan';
+
+/** Feed provenance for MiniMax M Plan labels (RET-500-nodupe). */
+export const MINIMAX_QUOTA_SOURCE = 'minimax-token-plan';
+
 /** One label's live quota snapshot as exposed at the public read model. */
 export interface ZaiQuotaLabelSnapshot {
   /** tenant_providers.label, e.g. `RCR` / `RCR Backup` / `CCR` / `CCR Backup`. */
@@ -38,6 +44,18 @@ export interface ZaiQuotaLabelSnapshot {
   subscription_status: string | null;
   /** ISO instant this label's last successful poll landed; null until one lands. */
   seen_at: string | null;
+  /**
+   * ISO instant this label's last poll ATTEMPT landed (success or error) —
+   * an errored label still says how recently it was tried (RET-500-nodupe:
+   * staleness honesty, the complement of the snapshot-wide `polled_at`).
+   */
+  polled_at: string | null;
+  /**
+   * Feed origin for this label: `zai-coding-plan` (z.ai monitor) or
+   * `minimax-token-plan` (MiniMax `/v1/token_plan/remains`); null until the
+   * first attempt stamps it.
+   */
+  source: string | null;
   /** Last poll error for this label (class only, never key or body material). */
   error: string | null;
 }
@@ -143,6 +161,19 @@ function betterReading(a: WindowReading, b: WindowReading): WindowReading {
 }
 
 /**
+ * Did the parse actually land the 5-hour window (a pct and/or a reset)?
+ * Both-null on a live envelope is exactly how a provider shape drift survives
+ * silently as a frozen anchor — callers turn `false` into the
+ * `parse_failed_5h` error class instead of serving the stale value quietly
+ * (RET-500-nodupe). Works for both parser outputs (identical field names).
+ */
+export function fiveHWindowParsed(
+  parsed: Pick<ParsedZaiQuota, 'five_h_pct_left' | 'five_h_reset_at'>,
+): boolean {
+  return parsed.five_h_pct_left !== null || parsed.five_h_reset_at !== null;
+}
+
+/**
  * Parse a `/api/monitor/usage/quota/limit` payload into window readings.
  *
  * Envelope: `{success, code?, msg?, data?}` (verified live: an unauthenticated
@@ -234,6 +265,8 @@ export function emptyLabelSnapshot(label: string): ZaiQuotaLabelSnapshot {
     plan_level: null,
     subscription_status: null,
     seen_at: null,
+    polled_at: null,
+    source: null,
     error: null,
   };
 }
