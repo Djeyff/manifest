@@ -93,7 +93,10 @@ export {
   supportsReasoningEffort,
 } from './reasoning-effort';
 export type { ReasoningEffort, ReasoningEffortSources } from './reasoning-effort';
-export { applyRequestParamDefaults } from './request-params';
+export {
+  applyRequestParamDefaults,
+  applyRequestParamDefaultsWithOverrides,
+} from './request-params';
 export type { JsonValue, RequestParamDefaults } from './request-params';
 export { snapshotRequestParams } from './request-params-snapshot';
 export type { RequestParamsSnapshotInput } from './request-params-snapshot';

@@ -1,8 +1,8 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import type { AuthType, ModelRoute } from 'manifest-shared';
-import { applyRequestParamsWithEffort } from 'manifest-shared';
+import type { AuthType, ModelRoute, RequestParamDefaults } from 'manifest-shared';
+import { applyRequestParamDefaultsWithOverrides, applyRequestParamsWithEffort } from 'manifest-shared';
 import { AgentModelParamsService } from '../routing-core/agent-model-params.service';
 import { ProviderParamSpecService } from '../routing-core/provider-param-spec.service';
 import { AutofixService, type AutofixAttempt } from '../autofix/autofix.service';
@@ -223,8 +223,8 @@ export class ProxyFallbackService {
     authType: AuthType | string | undefined,
     model: string,
     hopReasoningEffort?: string | null,
-  ): Promise<Record<string, unknown>> {
-    if (!ctx || !authType) return body;
+  ): Promise<{ body: Record<string, unknown>; overrides?: RequestParamDefaults }> {
+    if (!ctx || !authType) return { body };
     const modelParams = await this.modelParamsService.get(
       ctx.agentId,
       ctx.scopeKey,
@@ -233,14 +233,17 @@ export class ProxyFallbackService {
       model,
     );
     const specs = await this.providerParamSpecs.getSpecs(provider, authType as AuthType, model);
-    // Per-attempt reasoning-effort precedence: this attempt's route (hop)
-    // beats the tier-level override, which beats the panel value, which beats
-    // what the client sent. Injection is gated on the MPS catalog declaring
-    // the knob for this exact (provider, auth, model).
-    return applyRequestParamsWithEffort(body, modelParams, specs, {
+    const merged = applyRequestParamDefaultsWithOverrides(body, modelParams, specs);
+    // Fork (D-2026-11-22-10): per-attempt reasoning-effort precedence applied on
+    // top of upstream defaults+overrides — this attempt's route (hop) beats the
+    // tier-level override, which beats the panel value, which beats what the
+    // client sent. Injection is gated on the MPS catalog declaring the knob for
+    // this exact (provider, auth, model).
+    const mergedBody = applyRequestParamsWithEffort(merged.body, modelParams, specs, {
       hop: hopReasoningEffort ?? null,
       tier: ctx.tierReasoningEffort ?? null,
     });
+    return { body: mergedBody, overrides: merged.overrides };
   }
 
   async tryFallbacks(
@@ -1173,7 +1176,7 @@ export class ProxyFallbackService {
     // new agent_model_params table, so a primary OpenAI route with a
     // DeepSeek fallback no longer needs the old per-provider filter —
     // OpenAI's lookup returns null, DeepSeek's returns its own row.
-    let body = await this.applyParamMerge(
+    const { body: mergedBody, overrides: mergedOverrides } = await this.applyParamMerge(
       opts.body,
       opts.paramMergeContext,
       provider,
@@ -1181,6 +1184,7 @@ export class ProxyFallbackService {
       opts.model,
       opts.hopReasoningEffort,
     );
+    const merged = mergedBody;
     // Agent-scope fallback for providers (OpenCode) that need a session id on
     // every request even when the caller sent no x-session-key. NUL-joined so
     // distinct (tenant, agent) pairs can never collide before hashing.
@@ -1229,28 +1233,26 @@ export class ProxyFallbackService {
     const resolveChatBody = opts.resolveChatBody
       ? () => {
           resolvedChatBody ??= (async () => {
-            let resolved = await opts.resolveChatBody!();
-            resolved = await this.applyParamMerge(
-              resolved,
+            const { body: resolved } = await this.applyParamMerge(
+              await opts.resolveChatBody!(),
               opts.paramMergeContext,
               provider,
               authType,
               opts.model,
               opts.hopReasoningEffort,
             );
-            resolved = await this.reasoningCache.prepareRequest(
+            return this.reasoningCache.prepareRequest(
               resolved,
               opts.reasoningCacheKey ?? opts.sessionKey,
               reasoningEndpointKey,
               forwardModel,
             );
-            return resolved;
           })();
           return resolvedChatBody;
         }
       : undefined;
-    body = await this.reasoningCache.prepareRequest(
-      body,
+    const body = await this.reasoningCache.prepareRequest(
+      merged.body,
       opts.reasoningCacheKey ?? opts.sessionKey,
       reasoningEndpointKey,
       forwardModel,
@@ -1275,6 +1277,9 @@ export class ProxyFallbackService {
         apiKey: effectiveKey,
         model: forwardModel,
         body,
+        ...(opts.apiMode === 'responses' && merged.overrides
+          ? { savedRequestParams: merged.overrides }
+          : {}),
         resolveChatBody,
         stream,
         signal,
