@@ -934,3 +934,62 @@
     opacity: 0.45;
   }
 }
+
+/* ── Public quota page (ret500-nodupe) ────────────────────────────────────
+   The always-served /quota mirror: single column, phone-first, reuses the
+   console's meter/panel/pill primitives so the two surfaces can never drift. */
+.pq-page {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: var(--gap-lg);
+}
+
+/* The formula strip — the arithmetic is the interface, spelled out. */
+.pq-formula {
+  margin: var(--gap-xs) 0 var(--gap-sm);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: hsl(var(--muted));
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-2xs);
+  color: hsl(var(--foreground));
+  overflow-wrap: anywhere;
+}
+
+/* Pace + windows side by side; collapses to one column on phone widths. */
+.pq-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--gap-md);
+  margin-top: var(--gap-md);
+}
+
+@media (max-width: 720px) {
+  .pq-split {
+    grid-template-columns: 1fr;
+  }
+}
+
+.pq-source {
+  margin-top: var(--gap-xs);
+}
+
+.pq-tick {
+  margin-top: 0;
+  text-align: right;
+}
+
+/* Pace tones beyond the console's ahead/on-pace/behind: FAST burns faster
+   than even spread (danger), SLOW under-burns (warning). */
+.wc-pace--fast {
+  color: hsl(var(--destructive));
+  background: hsl(var(--destructive) / 0.12);
+}
+.wc-pace--slow {
+  color: hsl(var(--warning));
+  background: hsl(var(--warning) / 0.14);
+}
+.wc-pace--unknown {
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--muted));
+}

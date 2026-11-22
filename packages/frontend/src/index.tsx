@@ -19,6 +19,7 @@ import './styles/theme.css';
 clearReloadFlag();
 
 const GlobalOverview = lazyReload(() => import('./pages/GlobalOverview.jsx'));
+const Quota = lazyReload(() => import('./pages/Quota.jsx'));
 const AgentDetail = lazyReload(() => import('./pages/AgentDetail.jsx'));
 const AgentOverview = lazyReload(() => import('./pages/AgentOverview.jsx'));
 const AgentProviders = lazyReload(() => import('./pages/AgentProviders.jsx'));
@@ -186,6 +187,9 @@ render(
         <Route path="/welcome" component={WelcomeLayout}>
           <Route path="/" component={Welcome} />
         </Route>
+        {/* Public always-served quota mirror (ret500-nodupe) — no auth wall:
+            parked wallets keep their rows; this page renders its own shell. */}
+        <Route path="/quota" component={Quota} />
         <Route path="*404" component={NotFound} />
       </Router>
     </MetaProvider>
