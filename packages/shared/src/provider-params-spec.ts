@@ -136,12 +136,25 @@ export function getProviderParamSpecs(
   const id = paramLookupIdentity(providerId, authType, model);
   if (!id.providerId || !id.authType || !id.model) return [];
   const provider = normalizeProviderParamProviderId(id.providerId);
-  const entry = catalog.find(
+  let entry = catalog.find(
     (spec) =>
       normalizeProviderParamProviderId(spec.provider) === provider &&
       spec.authType === id.authType &&
       spec.model === id.model,
   );
+  // Auth-type fallback (D-2026-11-22-10): the wire knobs a model accepts do not
+  // depend on how the caller bills (api_key vs subscription). Catalogs often
+  // ship only the api_key variant (e.g. z-ai glm-5.3), which silently disabled
+  // tier reasoning-effort injection for subscription keys. Fall back to the
+  // same provider+model under api_key and stamp the requested identity.
+  if (!entry && id.authType !== 'api_key') {
+    entry = catalog.find(
+      (spec) =>
+        normalizeProviderParamProviderId(spec.provider) === provider &&
+        spec.authType === 'api_key' &&
+        spec.model === id.model,
+    );
+  }
   if (!entry) return [];
   return entry.params
     .map((param) => {
