@@ -8,6 +8,7 @@ import {
   type ProviderParamSpec,
 } from './provider-params-spec';
 import type { JsonValue, RequestParamDefaults } from './request-params';
+import { REASONING_EFFORT_PARAM_PATH } from './reasoning-effort';
 
 /**
  * Snapshot which model parameters were effectively in play for a provider
@@ -21,6 +22,12 @@ export interface RequestParamsSnapshotInput {
   modelParams: RequestParamDefaults | null | undefined;
   /** MPS catalog specs for the resolved provider/auth/model. */
   specs: readonly ProviderParamSpec[];
+  /**
+   * Effective reasoning effort for the attempt (tier/hop/panel/client
+   * precedence already applied upstream). Recorded so the persisted
+   * `agent_messages.request_params` shows the effort that was actually sent.
+   */
+  reasoningEffort?: string | null;
 }
 
 export function snapshotRequestParams(
@@ -56,7 +63,15 @@ export function snapshotRequestParams(
     body,
     orderedSpecs,
   );
-  return Object.keys(effective).length > 0 ? effective : null;
+  // The server-injected reasoning effort is part of what was actually sent
+  // even when the catalog strip or the spec walk dropped it, so record it
+  // after the strips — this is the value `agent_messages.request_params`
+  // must show (the injection verification surface).
+  const withEffort =
+    input.reasoningEffort && input.reasoningEffort.length > 0
+      ? setProviderParamValue(effective, REASONING_EFFORT_PARAM_PATH, input.reasoningEffort)
+      : effective;
+  return Object.keys(withEffort).length > 0 ? withEffort : null;
 }
 
 /**

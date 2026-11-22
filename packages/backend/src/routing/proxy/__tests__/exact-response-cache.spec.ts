@@ -6,7 +6,7 @@ import {
   canonicalizeRequest,
   envFlagEnabled,
   isCacheableRequest,
-} from './exact-response-cache';
+} from '../exact-response-cache';
 
 describe('RET-548 WP3 exact-response cache', () => {
   describe('envFlagEnabled', () => {
@@ -50,8 +50,18 @@ describe('RET-548 WP3 exact-response cache', () => {
 
   describe('buildExactCacheKey', () => {
     it('is stable for identical requests', () => {
-      const a = buildExactCacheKey({ model: 'm', body: { x: 1, y: 2 }, agentId: 'a', tenantId: 't' });
-      const b = buildExactCacheKey({ model: 'm', body: { y: 2, x: 1 }, agentId: 'a', tenantId: 't' });
+      const a = buildExactCacheKey({
+        model: 'm',
+        body: { x: 1, y: 2 },
+        agentId: 'a',
+        tenantId: 't',
+      });
+      const b = buildExactCacheKey({
+        model: 'm',
+        body: { y: 2, x: 1 },
+        agentId: 'a',
+        tenantId: 't',
+      });
       expect(a).toBe(b);
     });
 
@@ -64,24 +74,24 @@ describe('RET-548 WP3 exact-response cache', () => {
     });
 
     it('differs for different bodies', () => {
-      expect(
-        buildExactCacheKey({ model: 'm', body: { x: 1 } }),
-      ).not.toBe(buildExactCacheKey({ model: 'm', body: { x: 2 } }));
+      expect(buildExactCacheKey({ model: 'm', body: { x: 1 } })).not.toBe(
+        buildExactCacheKey({ model: 'm', body: { x: 2 } }),
+      );
     });
   });
 
   describe('isCacheableRequest', () => {
     it('refuses streaming, tools and non-zero temperature', () => {
-      expect(isCacheableRequest({ stream: true, 'x_manifest_exact_cache': true })).toBe(false);
-      expect(isCacheableRequest({ tools: [{ a: 1 }], 'x_manifest_exact_cache': true })).toBe(false);
-      expect(isCacheableRequest({ temperature: 0.7, 'x_manifest_exact_cache': true })).toBe(false);
+      expect(isCacheableRequest({ stream: true, x_manifest_exact_cache: true })).toBe(false);
+      expect(isCacheableRequest({ tools: [{ a: 1 }], x_manifest_exact_cache: true })).toBe(false);
+      expect(isCacheableRequest({ temperature: 0.7, x_manifest_exact_cache: true })).toBe(false);
     });
 
     it('requires an explicit opt-in marker', () => {
       expect(isCacheableRequest({})).toBe(false);
       expect(isCacheableRequest({ temperature: 0 })).toBe(false);
-      expect(isCacheableRequest({ 'x_manifest_exact_cache': true })).toBe(true);
-      expect(isCacheableRequest({ 'x_manifest_exact_cache': 'true' })).toBe(true);
+      expect(isCacheableRequest({ x_manifest_exact_cache: true })).toBe(true);
+      expect(isCacheableRequest({ x_manifest_exact_cache: 'true' })).toBe(true);
     });
   });
 
@@ -119,7 +129,7 @@ describe('RET-548 WP3 exact-response cache', () => {
   describe('ExactResponseCacheService', () => {
     it('never hits or stores when disabled', () => {
       const svc = new ExactResponseCacheService(false);
-      const req = { model: 'm', body: { 'x_manifest_exact_cache': true }, agentId: 'a' };
+      const req = { model: 'm', body: { x_manifest_exact_cache: true }, agentId: 'a' };
       svc.store(req, { answer: 1 });
       expect(svc.lookup(req).hit).toBe(false);
       expect(svc.isEnabled()).toBe(false);
@@ -127,7 +137,7 @@ describe('RET-548 WP3 exact-response cache', () => {
 
     it('serves an exact replay when enabled', () => {
       const svc = new ExactResponseCacheService(true);
-      const req = { model: 'm', body: { 'x_manifest_exact_cache': true }, agentId: 'a' };
+      const req = { model: 'm', body: { x_manifest_exact_cache: true }, agentId: 'a' };
       svc.store(req, { answer: 42 });
       const hit = svc.lookup(req);
       expect(hit.hit).toBe(true);
@@ -136,10 +146,10 @@ describe('RET-548 WP3 exact-response cache', () => {
 
     it('does not serve a near miss', () => {
       const svc = new ExactResponseCacheService(true);
-      svc.store({ model: 'm', body: { 'x_manifest_exact_cache': true, x: 1 } }, { answer: 1 });
-      expect(
-        svc.lookup({ model: 'm', body: { 'x_manifest_exact_cache': true, x: 2 } }).hit,
-      ).toBe(false);
+      svc.store({ model: 'm', body: { x_manifest_exact_cache: true, x: 1 } }, { answer: 1 });
+      expect(svc.lookup({ model: 'm', body: { x_manifest_exact_cache: true, x: 2 } }).hit).toBe(
+        false,
+      );
     });
 
     it('does not store non-cacheable requests', () => {

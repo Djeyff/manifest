@@ -5,6 +5,13 @@ export interface ModelRoute {
   authType: AuthType;
   model: string;
   keyLabel?: string | null;
+  /**
+   * Reasoning effort for this route, stored in the route JSONB next to the
+   * other fields (`reasoning_effort`). When present it overrides the
+   * Model-parameters panel value and the client's request value for the
+   * attempt that uses this route.
+   */
+  reasoning_effort?: string | null;
 }
 
 export function routeEquals(
@@ -40,6 +47,15 @@ export function isModelRoute(value: unknown): value is ModelRoute {
     v.keyLabel !== undefined &&
     v.keyLabel !== null &&
     typeof v.keyLabel !== 'string'
+  )
+    return false;
+  // `reasoning_effort` is optional on the route JSONB — tolerate it, but only
+  // when it is a string (or explicitly null).
+  if (
+    'reasoning_effort' in v &&
+    v.reasoning_effort !== undefined &&
+    v.reasoning_effort !== null &&
+    typeof v.reasoning_effort !== 'string'
   )
     return false;
   return true;

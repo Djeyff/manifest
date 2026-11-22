@@ -31,6 +31,13 @@ export interface ResolveResponse {
   /** Effective transport policy configured on the resolved routing chain. */
   response_mode?: ResponseMode;
   specificity_category?: SpecificityCategory;
+  /**
+   * Reasoning effort carried by the resolved tier's `override_route`
+   * (`reasoning_effort` key inside the JSONB). Null when the tier sets no
+   * tier-level effort; the proxy folds it into the per-attempt effort
+   * precedence (hop > tier > panel > client).
+   */
+  tier_reasoning_effort?: string | null;
   header_tier_id?: string;
   header_tier_name?: string;
   header_tier_color?: string;
