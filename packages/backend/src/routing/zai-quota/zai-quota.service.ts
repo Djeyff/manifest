@@ -5,11 +5,14 @@ import { TenantProvider } from '../../entities/tenant-provider.entity';
 import { decryptWithAny, getDecryptionSecrets } from '../../common/utils/crypto.util';
 import { isZaiProviderId } from '../zai-region';
 import {
+  MINIMAX_QUOTA_SOURCE,
   ZAI_MONITOR_BASE_DEFAULT,
   ZAI_MONITOR_QUOTA_PATH,
+  ZAI_QUOTA_SOURCE,
   ZaiQuotaLabelSnapshot,
   ZaiQuotaSnapshot,
   emptyLabelSnapshot,
+  fiveHWindowParsed,
   parseZaiQuotaLimitPayload,
 } from './zai-quota-monitor';
 import {
@@ -52,6 +55,11 @@ function clampTimeoutMs(envValue: string | undefined): number {
   return Math.min(60_000, Math.max(1_000, Math.trunc(parsed)));
 }
 
+/** Feed provenance for one connection kind (RET-500-nodupe). */
+function sourceForKind(kind: QuotaConnectionKind): string {
+  return kind === 'minimax' ? MINIMAX_QUOTA_SOURCE : ZAI_QUOTA_SOURCE;
+}
+
 /**
  * Live Z.AI coding-plan quota poller (RET-595), extended additively in
  * RET-598-FU7-GW to also poll MiniMax M Plan subscription connections
@@ -59,10 +67,13 @@ function clampTimeoutMs(envValue: string | undefined): number {
  * per-label snapshot — the zai filter, monitor URL, cadence and error
  * semantics are untouched, so existing rows stay byte-compatible.
  *
- * Every cycle it reads the active `zai` subscription connections (the only
- * place the plan keys exist — encrypted at rest), asks the Z.AI monitor
- * endpoint for each key's rolling 5-hour/weekly gauges, and exposes the
- * per-label snapshots at `GET /api/v1/zai-quota`. The admission proxy mirrors
+ * Every cycle it reads ALL subscription connections for the feed — z.ai and
+ * MiniMax, active OR parked (RET-500-nodupe: `is_active` gates ROUTING, not
+ * telemetry; a parked seat still owns quota truth the owner must see) — asks
+ * the provider monitor endpoints for each key's rolling 5-hour/weekly gauges,
+ * and exposes the per-label snapshots at `GET /api/v1/zai-quota`, every label
+ * provenance-stamped (`source` + per-label `polled_at`, success or error).
+ * The admission proxy mirrors
  * this route into its `/status` `quota_labels` contract so the owner widget
  * shows real percentages. Telemetry only: every failure path degrades to a
  * per-label error class and never breaks forwarding, and no key material is
@@ -162,7 +173,9 @@ export class ZaiQuotaService implements OnModuleInit, OnModuleDestroy {
       const cooldownUntil = this.cooldownUntil.get(label) ?? 0;
       if (nowMs < cooldownUntil) {
         // Retain the last reading while the label cools down (429 protection).
-        labels[label] = this.state.labels[label] ?? emptyLabelSnapshot(label);
+        const retained = this.state.labels[label] ?? emptyLabelSnapshot(label);
+        if (retained.source === null) retained.source = sourceForKind(connection.kind);
+        labels[label] = retained;
         continue;
       }
       labels[label] = await this.pollLabel(connection, nowIso, this.state.labels[label]);
@@ -178,6 +191,11 @@ export class ZaiQuotaService implements OnModuleInit, OnModuleDestroy {
     previous?: ZaiQuotaLabelSnapshot,
   ): Promise<ZaiQuotaLabelSnapshot> {
     const snapshot = emptyLabelSnapshot(connection.label);
+    // Provenance + attempt time are stamped before anything can fail, so even
+    // an errored label answers "which feed, how recently tried" honestly
+    // (RET-500-nodupe: never silently serve a stale anchor).
+    snapshot.source = sourceForKind(connection.kind);
+    snapshot.polled_at = nowIso;
     let bearerKey: string;
     let url: string;
     try {
@@ -260,6 +278,15 @@ export class ZaiQuotaService implements OnModuleInit, OnModuleDestroy {
       snapshot.weekly_reset_at = parsed.weekly_reset_at;
       snapshot.plan_level = parsed.plan_level;
       snapshot.subscription_status = parsed.subscription_status;
+      if (!fiveHWindowParsed(parsed)) {
+        // 200 + ok envelope but no usable 5-hour window in the payload:
+        // provider shape drift. Keep the previous readings visible but say
+        // so — never a silent anchor (RET-500-nodupe).
+        snapshot.error = 'parse_failed_5h';
+        carryForward(previous, snapshot);
+        this.state.poll_errors += 1;
+        return snapshot;
+      }
       snapshot.seen_at = nowIso;
       snapshot.error = null;
       return snapshot;
@@ -271,6 +298,16 @@ export class ZaiQuotaService implements OnModuleInit, OnModuleDestroy {
     snapshot.weekly_reset_at = parsed.weekly_reset_at;
     snapshot.plan_level = parsed.plan_level;
     snapshot.subscription_status = parsed.subscription_status;
+    if (!fiveHWindowParsed(parsed) && parsed.subscription_status !== 'inactive_or_free') {
+      // 200 + success envelope but the 5-hour window is gone from the
+      // payload: shape drift -> labeled failure, previous readings carried
+      // forward. (`inactive_or_free` is the healthy unfunded-key answer —
+      // null gauges there are truth, not a parse failure.)
+      snapshot.error = 'parse_failed_5h';
+      carryForward(previous, snapshot);
+      this.state.poll_errors += 1;
+      return snapshot;
+    }
     snapshot.seen_at = nowIso;
     snapshot.error = null;
     return snapshot;
@@ -282,9 +319,12 @@ export class ZaiQuotaService implements OnModuleInit, OnModuleDestroy {
 
   private async loadConnections(): Promise<{ rows: ZaiSubscriptionConnection[]; failed: boolean }> {
     try {
-      const found = await this.providerRepo.find({ where: { is_active: true } });
+      // RET-500-nodupe: poll every subscription row REGARDLESS of is_active —
+      // a parked/inactive seat still owns quota the owner must see; is_active
+      // governs ROUTING, not telemetry. Without this, parking a key silently
+      // removes its label (and its live 5h/weekly truth) from the feed.
+      const found = await this.providerRepo.find({ where: { auth_type: 'subscription' } });
       const subscriptionKeyPresent = (row: (typeof found)[number]): boolean =>
-        row.is_active === true &&
         row.auth_type === 'subscription' &&
         typeof row.api_key_encrypted === 'string' &&
         row.api_key_encrypted.length > 0;
@@ -378,6 +418,8 @@ interface ZaiSubscriptionConnection {
  * Carry last-known readings forward onto an errored snapshot, so consumers
  * keep a stale-but-labeled gauge (with the error class + old seen_at saying
  * exactly how stale) instead of losing a working reading to one bad poll.
+ * `source`/`polled_at` are stamped by the caller BEFORE this runs, so they
+ * always describe the fresh attempt, not the stale reading (RET-500-nodupe).
  */
 function carryForward(
   previous: ZaiQuotaLabelSnapshot | undefined,

@@ -65,6 +65,9 @@ describe('ZaiQuotaService (RET-595)', () => {
     expect(snap.labels['RCR'].error).toBeNull();
     expect(snap.labels['RCR'].seen_at).not.toBeNull();
     expect(snap.labels['RCR'].plan_level).toBe('lite');
+    // RET-500-nodupe provenance: every label names its feed + last attempt.
+    expect(snap.labels['RCR'].source).toBe('zai-coding-plan');
+    expect(snap.labels['RCR'].polled_at).not.toBeNull();
     expect(snap.polled_at).not.toBeNull();
     expect(snap.polls).toBe(1);
     expect(snap.poll_errors).toBe(0);
@@ -99,15 +102,17 @@ describe('ZaiQuotaService (RET-595)', () => {
         zaiRow({ provider: 'openai' }),
         zaiRow({ auth_type: 'api_key' }),
         zaiRow({ api_key_encrypted: null as unknown as string }),
-        zaiRow({ is_active: false }),
+        // RET-500-nodupe: a PARKED (is_active=false) seat still polls —
+        // is_active gates routing, not telemetry, so its label stays fed.
+        zaiRow({ label: 'RCR Parked', is_active: false }),
         zaiRow({ label: '  CCR  ', api_key_encrypted: encrypt('test-key-ccr', TEST_SECRET) }),
       ]),
       fetchImpl as unknown as () => Promise<{ status: number; body: unknown }>,
     );
     await svc.tick();
-    // Only RCR + the trimmed CCR survive; unknown-provider/other-auth rows never fetch.
-    expect(Object.keys(svc.snapshot().labels).sort()).toEqual(['CCR', 'RCR']);
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    // RCR + trimmed CCR + the parked row poll; unknown-provider/other-auth rows never fetch.
+    expect(Object.keys(svc.snapshot().labels).sort()).toEqual(['CCR', 'RCR', 'RCR Parked']);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
 
   it('classifies monitor failures per label without failing the cycle', async () => {
@@ -162,6 +167,8 @@ describe('ZaiQuotaService (RET-595)', () => {
     expect(errored.error).toBe('http_503');
     expect(errored.five_h_pct_left).toBe(60); // stale-but-labeled, not wiped
     expect(errored.seen_at).toBe(firstSeenAt); // old seen_at says exactly how stale
+    expect(errored.source).toBe('zai-coding-plan'); // provenance stays stamped on errors
+    expect(errored.polled_at).not.toBeNull(); // attempt time fresh even when readings carried
   });
 
   it('classifies key decryption failure as key_decrypt_failed', async () => {
@@ -287,5 +294,44 @@ describe('ZaiQuotaService (RET-595)', () => {
     const svc = new ZaiQuotaService(null as unknown as Repository<TenantProvider>);
     expect(() => svc.onModuleInit()).not.toThrow();
     svc.onModuleDestroy();
+  });
+
+  it('marks a 200-without-a-5h-window payload as parse_failed_5h, keeping previous readings', async () => {
+    // Weekly-only envelope: the shape drift that froze the Nov-14 anchors.
+    const noFiveH = {
+      success: true,
+      data: { level: 'lite', limits: [{ unit: 6, number: 1, percentage: 10, nextResetTime: 1800595200000 }] },
+    };
+    let body: unknown = OK_BODY;
+    const fetchImpl = jest.fn(async () => ({ status: 200, body }));
+    const svc = new ZaiQuotaService(
+      makeRepo([zaiRow()]),
+      fetchImpl as unknown as () => Promise<{ status: number; body: unknown }>,
+    );
+    await svc.tick();
+    expect(svc.snapshot().labels['RCR'].error).toBeNull();
+    body = noFiveH;
+    await svc.tick();
+    const drifted = svc.snapshot().labels['RCR'];
+    expect(drifted.error).toBe('parse_failed_5h');
+    expect(drifted.five_h_pct_left).toBe(60); // previous readings kept, honestly labeled
+    expect(drifted.weekly_pct_left).toBe(90);
+    expect(drifted.source).toBe('zai-coding-plan');
+    expect(drifted.polled_at).not.toBeNull();
+    expect(svc.snapshot().poll_errors).toBe(1);
+  });
+
+  it('keeps a healthy inactive_or_free answer error-free even with null gauges', async () => {
+    const fetchImpl = jest.fn(async () => ({ status: 200, body: { success: false } }));
+    const svc = new ZaiQuotaService(
+      makeRepo([zaiRow()]),
+      fetchImpl as unknown as () => Promise<{ status: number; body: unknown }>,
+    );
+    await svc.tick();
+    const label = svc.snapshot().labels['RCR'];
+    expect(label.subscription_status).toBe('inactive_or_free');
+    expect(label.error).toBeNull();
+    expect(label.source).toBe('zai-coding-plan');
+    expect(label.polled_at).not.toBeNull();
   });
 });

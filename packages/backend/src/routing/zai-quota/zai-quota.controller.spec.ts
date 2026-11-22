@@ -15,6 +15,8 @@ describe('ZaiQuotaController — GET /api/v1/zai-quota', () => {
         plan_level: 'lite',
         subscription_status: null,
         seen_at: '2026-11-07T21:00:00.000Z',
+        polled_at: '2026-11-07T21:00:00.000Z',
+        source: 'zai-coding-plan',
         error: null,
       },
     },

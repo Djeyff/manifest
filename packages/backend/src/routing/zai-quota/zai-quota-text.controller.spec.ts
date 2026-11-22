@@ -13,6 +13,8 @@ function labelRow(overrides: Partial<ZaiQuotaLabelSnapshot> = {}): ZaiQuotaLabel
     plan_level: null,
     subscription_status: null,
     seen_at: null,
+    polled_at: null,
+    source: null,
     error: null,
     ...overrides,
   };
