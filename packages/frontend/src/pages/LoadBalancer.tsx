@@ -24,6 +24,12 @@ import {
 
 const REFRESH_MS = 15_000;
 
+/** A server-published percentage, or an explicit "not published" marker. */
+function pct(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '—';
+  return `${value.toFixed(2)}%`;
+}
+
 export default function LoadBalancer() {
   const [access] = createResource(getWalletConsoleAccess);
   const [balancer, { refetch }] = createResource(
@@ -54,6 +60,22 @@ export default function LoadBalancer() {
 
   const tone = (card: LoadBalancerCard) => card.state.tone;
 
+  /** The engine's published base daily line (% of the weekly pool per ration day). */
+  const baseLine = (): number | null => {
+    for (const line of balancer()?.day_lines ?? []) {
+      if (typeof line.base_pct === 'number') return line.base_pct;
+    }
+    return null;
+  };
+
+  /** The engine's published reserve held back (% of the weekly pool). */
+  const reserveLine = (): number | null => {
+    for (const line of balancer()?.day_lines ?? []) {
+      if (typeof line.reserve_pct === 'number') return line.reserve_pct;
+    }
+    return null;
+  };
+
   return (
     <>
       <Title>Load balancer · Manifest</Title>
@@ -73,11 +95,8 @@ export default function LoadBalancer() {
             <div class="wc-breadcrumb">Wallets / who draws first</div>
           </div>
           <div class="wc-header-controls">
-            <Show when={balancer()?.demo}>
-              <span class="wc-demo-note">demo data · live API not deployed yet</span>
-            </Show>
             <Show when={lastRefresh()}>
-              {(at) => <span class="wc-demo-note">updated {at().slice(11, 16)}Z</span>}
+              {(at) => <span class="wc-note">updated {at().slice(11, 16)}Z</span>}
             </Show>
             <button class="btn btn--outline" type="button" onClick={() => void refresh()}>
               Refresh
@@ -112,6 +131,190 @@ export default function LoadBalancer() {
                 <Pill tone={data().admission.tone}>{data().admission.label}</Pill>
               </div>
 
+              <Show
+                when={data().engine}
+                fallback={
+                  <div class="wc-panel">
+                    <div class="wc-panel__title">
+                      Allowance engine <span class="sub">rollover · anchors · ticks</span>
+                    </div>
+                    <div class="wc-state" role="status">
+                      The governor published no allowance-engine state, so no engine numbers are
+                      drawn.
+                    </div>
+                  </div>
+                }
+              >
+                {(engine) => (
+                  <div class="wc-panel">
+                    <div class="wc-panel__title">
+                      Allowance engine <span class="sub">rollover · anchors · ticks</span>
+                    </div>
+                    <div class="wc-split-2">
+                      <section class="wc-panel">
+                        <div class="wc-panel__title">Rollover</div>
+                        <Kv
+                          k="Rollover"
+                          v={
+                            engine().rollover_enabled
+                              ? 'on — completed-day surplus is replayed'
+                              : 'off — no surplus is replayed'
+                          }
+                        />
+                        <Kv k="Model" v={engine().rollover_model ?? 'not published'} />
+                        <Kv k="Mode" v={engine().rollover_mode ?? 'not published'} />
+                        <Kv k="Active" v={engine().rollover_active ?? 'not published'} />
+                        <Kv k="Reason" v={engine().rollover_reason ?? 'not published'} />
+                      </section>
+                      <section class="wc-panel">
+                        <div class="wc-panel__title">Pool membership</div>
+                        <Kv k="Primary" v={engine().primary ?? 'not published'} />
+                        <Kv
+                          k="Primary usable"
+                          v={
+                            engine().primary_usable_pct === null
+                              ? 'not published'
+                              : `${engine().primary_usable_pct!.toFixed(2)}%`
+                          }
+                        />
+                        <Kv k="Backup" v={engine().backup ?? 'not published'} />
+                        <Kv
+                          k="Backup usable"
+                          v={
+                            engine().backup_usable_pct === null
+                              ? 'not published'
+                              : `${engine().backup_usable_pct!.toFixed(2)}%`
+                          }
+                        />
+                        <Kv
+                          k="Backup membership"
+                          v={
+                            engine().backup_membership_active
+                              ? `active${engine().backup_membership_end ? ` until ${engine().backup_membership_end}` : ''}`
+                              : 'inactive'
+                          }
+                        />
+                      </section>
+                    </div>
+                    <div class="wc-split-2">
+                      <section class="wc-panel">
+                        <div class="wc-panel__title">Reset anchors</div>
+                        <Kv k="Week start" v={engine().week_start ?? 'not published'} />
+                        <Kv k="Day start (UTC)" v={engine().day_start_utc ?? 'not published'} />
+                        <Kv k="Day epoch" v={engine().day_epoch ?? 'not published'} />
+                        <Kv
+                          k="New ration day"
+                          v={engine().new_ration_day ? 'yes — today is a new ration day' : 'no'}
+                        />
+                      </section>
+                      <section class="wc-panel">
+                        <div class="wc-panel__title">Enforcement</div>
+                        <Kv
+                          k="Last enforcement tick"
+                          v={data().enforce_tick_at ?? engine().enforce_tick_at ?? 'not published'}
+                        />
+                        <Kv
+                          k="Base daily line"
+                          v={
+                            baseLine()
+                              ? `${baseLine()!.toFixed(2)}% of the weekly pool per ration day`
+                              : 'not published'
+                          }
+                        />
+                        <Kv
+                          k="Reserve held back"
+                          v={
+                            reserveLine()
+                              ? `${reserveLine()!.toFixed(2)}% of the weekly pool`
+                              : 'not published'
+                          }
+                        />
+                      </section>
+                    </div>
+                    <p class="wc-note">
+                      Every number here is the governor's own published state — the console never
+                      recomputes the allowance engine.
+                    </p>
+                  </div>
+                )}
+              </Show>
+
+              <div class="wc-panel">
+                <div class="wc-panel__title">
+                  Per-wallet day lines <span class="sub">one line per wallet account</span>
+                </div>
+                <Show
+                  when={data().day_lines.length > 0}
+                  fallback={
+                    <div class="wc-state" role="status">
+                      The governor published no day lines for this tenant.
+                    </div>
+                  }
+                >
+                  <table class="wc-table">
+                    <thead>
+                      <tr>
+                        <th scope="col">Wallet</th>
+                        <th scope="col">Day</th>
+                        <th scope="col" class="num">
+                          Base
+                        </th>
+                        <th scope="col" class="num">
+                          Rollover
+                        </th>
+                        <th scope="col" class="num">
+                          Reserve
+                        </th>
+                        <th scope="col" class="num">
+                          Allowed
+                        </th>
+                        <th scope="col" class="num">
+                          Used
+                        </th>
+                        <th scope="col" class="num">
+                          Left
+                        </th>
+                        <th scope="col" class="num">
+                          Pace / h
+                        </th>
+                        <th scope="col" class="num">
+                          End of day
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <For each={data().day_lines}>
+                        {(line) => (
+                          <tr>
+                            <th scope="row" style="font-weight:600;text-align:left">
+                              <WalletChip tone={line.name.toLowerCase()}>
+                                {line.display_name}
+                              </WalletChip>
+                              <div class="wc-note">{line.account}</div>
+                            </th>
+                            <td>{line.day_label ?? '—'}</td>
+                            <td class="num">{pct(line.base_pct)}</td>
+                            <td class="num">{pct(line.rollover_pct)}</td>
+                            <td class="num">{pct(line.reserve_pct)}</td>
+                            <td class="num">{pct(line.allowed_pct)}</td>
+                            <td class="num">{pct(line.used_pct)}</td>
+                            <td class="num">{pct(line.remaining_pct)}</td>
+                            <td class="num">{pct(line.pace_pct_per_h)}</td>
+                            <td class="num">{pct(line.projected_end_pct)}</td>
+                          </tr>
+                        )}
+                      </For>
+                    </tbody>
+                  </table>
+                  <p class="wc-note">
+                    <b>Projected reset-day end state</b> — the last column is what each line is
+                    projected to spend by the end of the ration day at the current burn pace. The
+                    day line is the governor's own: base + rollover − floor, with the reserve held
+                    back, and the day's reset anchor is the ration day, never a wall-clock midnight.
+                  </p>
+                </Show>
+              </div>
+
               <div class="wc-lb-grid">
                 <For each={data().cards}>
                   {(card) => (
@@ -120,7 +323,7 @@ export default function LoadBalancer() {
                         <div>
                           <div class="wc-lb-card__name">
                             <WalletChip tone={card.name.toLowerCase()}>
-                              {card.name} · {card.provider}
+                              {card.display_name}
                             </WalletChip>
                           </div>
                           <div class="wc-lb-card__lanes">{card.state.label}</div>

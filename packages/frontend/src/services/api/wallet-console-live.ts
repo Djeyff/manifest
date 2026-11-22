@@ -1,5 +1,8 @@
 import { fetchJson, fetchMutate } from './core';
+import { walletDisplayName } from './wallet-options';
 import type {
+  AllowanceEngineView,
+  DayLineView,
   ProgressBlock,
   ProgressResponse,
   LoadBalancerResponse,
@@ -9,14 +12,13 @@ import type {
   WalletLine,
   WalletPriorityRow,
   WalletSettingsResponse,
+  WindowHeadroom,
 } from './wallet-console';
 
 /**
  * Live transport for the wallet console (RET-721 → RET-720 backend).
  *
- * The banked demo client in `wallet-console.ts` talks to `/wallets/console/*`,
- * which the backend does not serve. This module speaks the REAL RET-720
- * contract (commit 54047be73):
+ * This module speaks the REAL RET-720 contract (commit 54047be73):
  *
  *   GET /wallets/:id/settings          → { settings }
  *   PUT /wallets/:id/settings          → { settings, changed, audit_id, ruling }
@@ -28,7 +30,9 @@ import type {
  * - No client-side budget arithmetic. Every percentage is server-computed;
  *   the formula strip renders the server's terms and the server's result.
  * - A 403 means "signed in, not the owner" — never "endpoint missing".
- * - Only a 404 (console surface disabled) falls back to the demo payload.
+ * - A 404 means the console surface is disabled — it is surfaced verbatim.
+ *   There is NO demo fallback: a console that invents numbers is worse than
+ *   one that says "not available".
  */
 
 /* ------------------------------------------------------------------ */
@@ -43,6 +47,11 @@ export interface RawWalletSettings {
   parked: boolean;
   kill_switch_fallback: boolean;
   daily_lines: { base_pct?: number; rollover_pool_pct?: number; floor_pct?: number } | null;
+  /** Owner reserve (% of the weekly pool); null = the governor's own reserve. */
+  reserve_pct?: number | null;
+  rollover_enabled?: boolean;
+  cross_class_pause?: boolean;
+  key_bindings?: Array<{ room: string; tenant_provider_id: string; label?: string; provider?: string }>;
   updated_at: string;
   updated_by_user_id: string | null;
 }
@@ -116,6 +125,14 @@ export interface RawDailyAccount {
   floor_pct: number | null;
   weekly_headroom_pct: number | null;
   five_h_headroom_pct: number | null;
+  reserve_pct: number | null;
+  accrued_at_lift_pct: number | null;
+  reserved_pct: number | null;
+  reservation_holds: number | null;
+  available_pct: number | null;
+  spent_week_pct: number | null;
+  weekly_pool: number | null;
+  denomination: string | null;
   drain_day: boolean;
   drain_window: boolean;
   allow: boolean;
@@ -123,8 +140,39 @@ export interface RawDailyAccount {
   day_number: number | null;
   day_index: number | null;
   ration_model: string | null;
+  release_stage: string | null;
+  binding_dimension: string | null;
+  capped_by_floor: boolean;
+  final_hour: boolean;
   reasons: string[];
   halted_by_console: boolean;
+  anchor: { epoch: number | null; source: string | null; stale: boolean; note: string | null } | null;
+  day_epoch: number | null;
+  day_start_utc: string | null;
+  day_elapsed_hours: number | null;
+  pace_pct_per_h: number | null;
+  projected_end_pct: number | null;
+  working_hours_left: number | null;
+}
+
+/** The allowance engine the governor publishes (rollover + day anchors). */
+export interface RawAllowanceEngine {
+  rollover_enabled: boolean;
+  rollover_model: string | null;
+  rollover_mode: string | null;
+  rollover_active: string | null;
+  rollover_reason: string | null;
+  primary: string | null;
+  primary_usable_pct: number | null;
+  backup: string | null;
+  backup_usable_pct: number | null;
+  backup_membership_active: boolean;
+  backup_membership_end: string | null;
+  new_ration_day: boolean;
+  week_start: string | null;
+  day_start_utc: string | null;
+  day_epoch: string | null;
+  enforce_tick_at: string | null;
 }
 
 export interface RawDailyWallet {
@@ -143,6 +191,7 @@ export interface RawDailyBudget {
   ration_updated_at: string | null;
   accounts: RawDailyAccount[];
   wallets: RawDailyWallet[];
+  engine: RawAllowanceEngine | null;
 }
 
 /** Thrown when the backend refuses the caller for a reason other than auth. */
@@ -332,15 +381,17 @@ export function mapLines(data: LiveConsoleData): WalletLine[] {
     const rollover = num(lines?.rollover_pool_pct ?? account?.rollover_pool_pct);
     const floor = num(lines?.floor_pct ?? account?.floor_pct);
     const allowed = num(account?.allowed_today_pct);
+    const provider = wallet.keys[0]?.provider ?? '—';
 
     return {
       wallet_id: wallet.wallet_id,
       name: wallet.name,
+      display_name: walletDisplayName(wallet.name, provider),
       color: wallet.color,
-      provider: wallet.keys[0]?.provider ?? '—',
+      provider,
       base_pct: base,
       rollover_pct: rollover,
-      reserve_pct: 0,
+      reserve_pct: num(account?.reserve_pct ?? settings?.reserve_pct),
       floor_pct: floor,
       allowed_pct: allowed,
       formula: formulaFrom(base, rollover, floor, allowed, 'allowed today'),
@@ -401,7 +452,6 @@ export function mapMembers(data: LiveConsoleData): Array<{ wallet: string; keys:
 export function mapSettingsResponse(data: LiveConsoleData): WalletSettingsResponse {
   const account = data.daily.accounts[0];
   return {
-    demo: false,
     week_anchor: null,
     night_window: null,
     lines: mapLines(data),
@@ -427,11 +477,13 @@ export function mapLoadBalancerResponse(data: LiveConsoleData): LoadBalancerResp
       : staleKeys.length > 0
         ? { label: 'Stale', tone: 'warn' as const, detail: 'reading older than 5 minutes' }
         : { label: 'Live', tone: 'ok' as const, detail: wallet.keys[0]?.seen_at ?? null };
+    const provider = wallet.keys[0]?.provider ?? '—';
 
     return {
       wallet_id: wallet.wallet_id,
       name: wallet.name,
-      provider: wallet.keys[0]?.provider ?? '—',
+      display_name: walletDisplayName(wallet.name, provider),
+      provider,
       state: wallet.parked
         ? { label: 'Parked', tone: 'warn' as const }
         : wallet.halted
@@ -456,7 +508,6 @@ export function mapLoadBalancerResponse(data: LiveConsoleData): LoadBalancerResp
   });
 
   return {
-    demo: false,
     admission: data.board.stale_feed
       ? { label: 'Stale feed', tone: 'warn' as const }
       : { label: 'Live', tone: 'ok' as const },
@@ -468,6 +519,108 @@ export function mapLoadBalancerResponse(data: LiveConsoleData): LoadBalancerResp
         .join(', '),
     })),
     lane_targets: null,
+    engine: mapEngine(data),
+    day_lines: mapDayLines(data),
+    enforce_tick_at: data.daily.engine?.enforce_tick_at ?? null,
+  };
+}
+
+/** The allowance engine, exactly as the governor published it. */
+export function mapEngine(data: LiveConsoleData): AllowanceEngineView | null {
+  const engine = data.daily.engine;
+  if (!engine) return null;
+  return {
+    rollover_enabled: engine.rollover_enabled ?? false,
+    rollover_model: engine.rollover_model ?? null,
+    rollover_mode: engine.rollover_mode ?? null,
+    rollover_active: engine.rollover_active ?? null,
+    rollover_reason: engine.rollover_reason ?? null,
+    primary: engine.primary ?? null,
+    primary_usable_pct: engine.primary_usable_pct ?? null,
+    backup: engine.backup ?? null,
+    backup_usable_pct: engine.backup_usable_pct ?? null,
+    backup_membership_active: engine.backup_membership_active ?? false,
+    backup_membership_end: engine.backup_membership_end ?? null,
+    new_ration_day: engine.new_ration_day ?? false,
+    week_start: engine.week_start ?? null,
+    day_start_utc: engine.day_start_utc ?? null,
+    day_epoch: engine.day_epoch ?? null,
+    enforce_tick_at: engine.enforce_tick_at ?? null,
+  };
+}
+
+/**
+ * The allowance engine's per-wallet day lines.
+ *
+ * One line per (wallet, governor account) pair — a wallet can own more than
+ * one account and each account carries its OWN line, so a merged wallet
+ * number would lie. Every field is server-computed.
+ */
+export function mapDayLines(data: LiveConsoleData): DayLineView[] {
+  const accountByName = new Map(data.daily.accounts.map((a) => [a.account, a]));
+  const lines: DayLineView[] = [];
+  for (const wallet of data.daily.wallets) {
+    const boardWallet = data.board.wallets.find((w) => w.wallet_id === wallet.wallet_id);
+    const provider = boardWallet?.keys[0]?.provider ?? '—';
+    const fiveH = windowOf(boardWallet?.keys, 'five_h');
+    const weekly = windowOf(boardWallet?.keys, 'weekly');
+    for (const accountName of wallet.accounts) {
+      const account = accountByName.get(accountName);
+      lines.push({
+        wallet_id: wallet.wallet_id,
+        name: wallet.name,
+        display_name: walletDisplayName(wallet.name, provider),
+        provider,
+        account: accountName,
+        day_label: dayLabel(account),
+        allowed_pct: account?.allowed_today_pct ?? null,
+        used_pct: account?.used_today_pct ?? null,
+        remaining_pct: account?.remaining_today_pct ?? null,
+        base_pct: account?.base_pct ?? null,
+        rollover_pct: account?.rollover_pool_pct ?? null,
+        reserve_pct: account?.reserve_pct ?? null,
+        accrued_at_lift_pct: account?.accrued_at_lift_pct ?? null,
+        available_pct: account?.available_pct ?? null,
+        floor_pct: account?.floor_pct ?? null,
+        pace_pct_per_h: account?.pace_pct_per_h ?? null,
+        projected_end_pct: account?.projected_end_pct ?? null,
+        working_hours_left: account?.working_hours_left ?? null,
+        day_elapsed_hours: account?.day_elapsed_hours ?? null,
+        day_epoch: account?.day_epoch ?? null,
+        day_start_utc: account?.day_start_utc ?? null,
+        anchor_note: account?.anchor?.note ?? null,
+        anchor_source: account?.anchor?.source ?? null,
+        anchor_stale: account?.anchor?.stale ?? false,
+        five_h: fiveH,
+        weekly,
+      });
+    }
+  }
+  return lines;
+}
+
+/**
+ * The provider-own headroom of one window across a wallet's keys: the
+ * LOWEST % left (the tightest key is the wallet's real headroom), with the
+ * reset stamp of the key that reports it.
+ */
+function windowOf(
+  keys: RawQuotaBoardKey[] | undefined,
+  window: 'five_h' | 'weekly',
+): WindowHeadroom {
+  const list = keys ?? [];
+  const leftKey = window === 'five_h' ? 'five_h_pct_left' : 'weekly_pct_left';
+  const resetKey = window === 'five_h' ? 'five_h_reset_at' : 'weekly_reset_at';
+  const values = list
+    .map((k) => k[leftKey])
+    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+  const tightest = values.length > 0 ? Math.min(...values) : null;
+  const tightestKey = list.find((k) => k[leftKey] === tightest);
+  const resetAt = tightestKey?.[resetKey] ?? null;
+  return {
+    pct_left: tightest,
+    reset_at: resetAt,
+    resets_label: resetLabel(resetAt),
   };
 }
 
@@ -502,6 +655,9 @@ export function mapProgressResponse(data: LiveConsoleData): ProgressResponse {
     const boardWallet = data.board.wallets.find((w) => w.wallet_id === wallet.wallet_id);
     const provider = boardWallet?.keys[0]?.provider ?? '—';
     const color = boardWallet?.color ?? '—';
+    const displayName = walletDisplayName(wallet.name, provider);
+    const fiveH = windowOf(boardWallet?.keys, 'five_h');
+    const weekly = windowOf(boardWallet?.keys, 'weekly');
     const accountNames = wallet.accounts ?? [];
 
     if (accountNames.length === 0) {
@@ -509,6 +665,7 @@ export function mapProgressResponse(data: LiveConsoleData): ProgressResponse {
       blocks.push({
         wallet_id: wallet.wallet_id,
         name: wallet.name,
+        display_name: displayName,
         color,
         provider,
         account: null,
@@ -528,6 +685,20 @@ export function mapProgressResponse(data: LiveConsoleData): ProgressResponse {
         resets_label: null,
         reset_hint: null,
         note: null,
+        five_h: fiveH,
+        weekly,
+        spent_week_pct: null,
+        weekly_pool: null,
+        denomination: null,
+        pace_pct_per_h: null,
+        projected_end_pct: null,
+        working_hours_left: null,
+        reserve_pct: null,
+        accrued_at_lift_pct: null,
+        rollover_pct: null,
+        day_start_utc: null,
+        anchor_note: null,
+        anchor_stale: false,
       });
       continue;
     }
@@ -549,6 +720,7 @@ export function mapProgressResponse(data: LiveConsoleData): ProgressResponse {
       blocks.push({
         wallet_id: wallet.wallet_id,
         name: wallet.name,
+        display_name: displayName,
         color,
         provider,
         account: accountName,
@@ -563,12 +735,7 @@ export function mapProgressResponse(data: LiveConsoleData): ProgressResponse {
         projected_pct: used,
         still_allowed_pct: remaining,
         floor_pct: floor,
-        pace:
-          used > allowed
-            ? ('behind' as const)
-            : allowed > 0 && used <= allowed * 0.5
-              ? ('ahead' as const)
-              : ('on-pace' as const),
+        pace: paceOf(used, allowed, account?.projected_end_pct),
         badges: [
           ...(account?.drain_day ? ['drain day'] : []),
           ...(account?.halted_by_console ? ['parked from console'] : []),
@@ -580,6 +747,20 @@ export function mapProgressResponse(data: LiveConsoleData): ProgressResponse {
         resets_label: dayLabel(account),
         reset_hint: account?.ration_model ? `${account.ration_model} day window` : null,
         note: account?.halted_by_console ? 'Parked from the console.' : null,
+        five_h: fiveH,
+        weekly,
+        spent_week_pct: account?.spent_week_pct ?? null,
+        weekly_pool: account?.weekly_pool ?? null,
+        denomination: account?.denomination ?? null,
+        pace_pct_per_h: account?.pace_pct_per_h ?? null,
+        projected_end_pct: account?.projected_end_pct ?? null,
+        working_hours_left: account?.working_hours_left ?? null,
+        reserve_pct: account?.reserve_pct ?? null,
+        accrued_at_lift_pct: account?.accrued_at_lift_pct ?? null,
+        rollover_pct: account?.rollover_pool_pct ?? null,
+        day_start_utc: account?.day_start_utc ?? null,
+        anchor_note: account?.anchor?.note ?? null,
+        anchor_stale: account?.anchor?.stale ?? false,
       });
     }
   }
@@ -587,7 +768,6 @@ export function mapProgressResponse(data: LiveConsoleData): ProgressResponse {
   const headroom = num(data.daily.accounts[0]?.weekly_headroom_pct);
 
   return {
-    demo: false,
     available: data.daily.available && data.daily.accounts.length > 0,
     unavailable_reason: data.daily.available
       ? (data.daily.accounts.length > 0
@@ -613,6 +793,26 @@ export function mapProgressResponse(data: LiveConsoleData): ProgressResponse {
     day_strip: null,
     audit: [...data.audit.values()].flat().sort((a, b) => b.at.localeCompare(a.at)),
   };
+}
+
+/**
+ * The burn pace label, derived from the server's own numbers: today's spend
+ * against today's allowance, and — when the governor published it — the
+ * projected end-of-day position. The client never invents a pace.
+ */
+function paceOf(
+  used: number,
+  allowed: number,
+  projectedEnd: number | null | undefined,
+): 'ahead' | 'on-pace' | 'behind' {
+  if (typeof projectedEnd === 'number' && allowed > 0) {
+    if (projectedEnd > allowed) return 'behind';
+    if (projectedEnd <= allowed * 0.75) return 'ahead';
+    return 'on-pace';
+  }
+  if (allowed > 0 && used > allowed) return 'behind';
+  if (allowed > 0 && used <= allowed * 0.5) return 'ahead';
+  return 'on-pace';
 }
 
 /* ------------------------------------------------------------------ */

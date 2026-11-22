@@ -19,7 +19,7 @@ import { TenantProvider } from '../../entities/tenant-provider.entity';
 import { DecisionLedgerService, MintedRuling } from './decision-ledger.service';
 
 /**
- * Wallet settings service (RET-720 scope a).
+ * Wallet settings service (RET-720 scope a → D-2026-11-22-11/-13).
  *
  * Owner-only surface: every read and write asserts that the authenticated
  * user owns the tenant (`tenants.owner_user_id`). The console is an
@@ -28,6 +28,30 @@ import { DecisionLedgerService, MintedRuling } from './decision-ledger.service';
  * Every change writes an audit row AND auto-mints a decisions-ledger ruling
  * (RET-719 doctrine: a UI action is doctrine, zero drift).
  */
+
+/** One wallet→key binding: which registered key serves this wallet per room. */
+export interface WalletKeyBinding {
+  /** Room the key serves (RCR / CCR / …), derived from the key label. */
+  room: string;
+  /** The registered provider key (`tenant_providers.id`). */
+  tenant_provider_id: string;
+  /** Key label, e.g. "RCR" — display only. */
+  label: string;
+  /** Provider of the key, e.g. "zai" — display only. */
+  provider: string;
+}
+
+/** A registered key of the tenant that a wallet can be bound to. */
+export interface ProviderKeyView {
+  id: string;
+  label: string;
+  provider: string;
+  /** Room the key serves (RCR / CCR / OTHER). */
+  room: string;
+  /** Wallet the key currently belongs to, when it is bound to one. */
+  bound_wallet_id: string | null;
+}
+
 export interface WalletSettingsView {
   wallet_id: string;
   tenant_id: string;
@@ -36,6 +60,14 @@ export interface WalletSettingsView {
   parked: boolean;
   kill_switch_fallback: boolean;
   daily_lines: WalletDailyLines | null;
+  /** Owner reserve (% of the weekly pool); null = the governor's own reserve. */
+  reserve_pct: number | null;
+  /** Rollover on/off. */
+  rollover_enabled: boolean;
+  /** Cross-class pause rule on/off. */
+  cross_class_pause: boolean;
+  /** The wallet's key bindings (one per room). */
+  key_bindings: WalletKeyBinding[];
   updated_at: string;
   updated_by_user_id: string | null;
 }
@@ -46,6 +78,11 @@ export interface UpdateWalletSettingsInput {
   parked?: boolean;
   kill_switch_fallback?: boolean;
   daily_lines?: WalletDailyLines | null;
+  reserve_pct?: number | null;
+  rollover_enabled?: boolean;
+  cross_class_pause?: boolean;
+  /** The wallet's key bindings (one per room). */
+  key_bindings?: Array<{ room: string; tenant_provider_id: string }>;
 }
 
 export interface WalletSettingsUpdateResult {
@@ -58,6 +95,14 @@ export interface WalletSettingsUpdateResult {
 
 const PRIORITY_MIN = 0;
 const PRIORITY_MAX = 1000;
+
+/** The room a key serves, derived from its label prefix (RCR / CCR / OTHER). */
+export function roomOfLabel(label: string): string {
+  const upper = (label ?? '').trim().toUpperCase();
+  if (upper.startsWith('RCR')) return 'RCR';
+  if (upper.startsWith('CCR')) return 'CCR';
+  return 'OTHER';
+}
 
 @Injectable()
 export class WalletConsoleService {
@@ -82,7 +127,8 @@ export class WalletConsoleService {
     await this.assertOwner(tenantId, userId);
     const wallet = await this.findWallet(tenantId, walletId);
     const row = await this.settingsRepo.findOne({ where: { wallet_id: wallet.id } });
-    return this.toView(wallet.id, tenantId, row);
+    const bindings = await this.bindingsOf(tenantId, wallet.id);
+    return this.toView(wallet.id, tenantId, row, bindings);
   }
 
   /** Apply a settings change: validate → persist → audit → mint ruling. */
@@ -95,13 +141,24 @@ export class WalletConsoleService {
     await this.assertOwner(tenantId, userId);
     const wallet = await this.findWallet(tenantId, walletId);
     const existing = await this.settingsRepo.findOne({ where: { wallet_id: wallet.id } });
-    const before = this.toView(wallet.id, tenantId, existing);
-    const patch = this.validatePatch(input);
+    const beforeBindings = await this.bindingsOf(tenantId, wallet.id);
+    const before = this.toView(wallet.id, tenantId, existing, beforeBindings);
+    const patch = await this.validatePatch(tenantId, input);
     const now = new Date().toISOString();
+
+    // Key bindings change the wallet's MEMBERSHIP rows, not the settings row.
+    if (patch.key_bindings !== undefined) {
+      await this.applyBindings(tenantId, wallet.id, patch.key_bindings);
+    }
+    const afterBindings =
+      patch.key_bindings !== undefined
+        ? await this.bindingsOf(tenantId, wallet.id)
+        : beforeBindings;
 
     const after: WalletSettingsView = {
       ...before,
       ...patch,
+      key_bindings: afterBindings,
       updated_at: now,
       updated_by_user_id: userId,
     };
@@ -117,6 +174,9 @@ export class WalletConsoleService {
       parked: after.parked,
       kill_switch_fallback: after.kill_switch_fallback,
       daily_lines: after.daily_lines,
+      reserve_pct: after.reserve_pct,
+      rollover_enabled: after.rollover_enabled,
+      cross_class_pause: after.cross_class_pause,
       updated_by_user_id: userId,
       created_at: existing?.created_at ?? now,
       updated_at: now,
@@ -190,23 +250,59 @@ export class WalletConsoleService {
     for (const wallet of wallets) {
       const row = await this.settingsRepo.findOne({ where: { wallet_id: wallet.id } });
       const memberList = membersByWallet.get(wallet.id) ?? [];
+      const bindings: WalletKeyBinding[] = memberList
+        .map((m) => {
+          const key = keyById.get(m.tenant_provider_id);
+          return {
+            room: roomOfLabel(key?.label ?? ''),
+            tenant_provider_id: m.tenant_provider_id,
+            label: key?.label ?? 'Unknown',
+            provider: key?.provider ?? 'unknown',
+          };
+        })
+        .sort((a, b) => a.room.localeCompare(b.room) || a.label.localeCompare(b.label));
       out.push({
         wallet: {
           id: wallet.id,
           name: wallet.name,
           color: wallet.color,
-          member_keys: memberList
-            .map((m) => ({
-              tenant_provider_id: m.tenant_provider_id,
-              label: keyById.get(m.tenant_provider_id)?.label ?? 'Unknown',
-              provider: keyById.get(m.tenant_provider_id)?.provider ?? 'unknown',
-            }))
-            .sort((a, b) => a.label.localeCompare(b.label)),
+          member_keys: bindings.map((b) => ({
+            tenant_provider_id: b.tenant_provider_id,
+            label: b.label,
+            provider: b.provider,
+          })),
         },
-        settings: this.toView(wallet.id, tenantId, row),
+        settings: this.toView(wallet.id, tenantId, row, bindings),
       });
     }
     return out;
+  }
+
+  /**
+   * The registered keys a wallet can be bound to (D-2026-11-22-13): the
+   * tenant's provider keys, each with the room it serves and the wallet it is
+   * currently bound to. This is the ONLY place wallet→key bindings change.
+   */
+  async listProviderKeys(
+    tenantId: string,
+    userId: string | null,
+  ): Promise<ProviderKeyView[]> {
+    await this.assertOwner(tenantId, userId);
+    const keys = await this.providerRepo.find({ where: { tenant_id: tenantId } });
+    const members = await this.memberRepo.find({ where: { tenant_id: tenantId } });
+    const boundBy = new Map<string, string>();
+    for (const member of members) {
+      boundBy.set(member.tenant_provider_id, member.wallet_id);
+    }
+    return keys
+      .map((key) => ({
+        id: key.id,
+        label: key.label,
+        provider: key.provider,
+        room: roomOfLabel(key.label),
+        bound_wallet_id: boundBy.get(key.id) ?? null,
+      }))
+      .sort((a, b) => a.room.localeCompare(b.room) || a.label.localeCompare(b.label));
   }
 
   /** Owner-only gate: the authenticated user must own the tenant. */
@@ -226,7 +322,68 @@ export class WalletConsoleService {
     return wallet;
   }
 
-  private toView(walletId: string, tenantId: string, row?: WalletSettings | null): WalletSettingsView {
+  /** The wallet's current bindings, resolved against the registered keys. */
+  private async bindingsOf(tenantId: string, walletId: string): Promise<WalletKeyBinding[]> {
+    const members = await this.memberRepo.find({ where: { wallet_id: walletId, tenant_id: tenantId } });
+    if (members.length === 0) return [];
+    const keys = await this.providerRepo.find({
+      where: { tenant_id: tenantId },
+      select: ['id', 'label', 'provider'],
+    });
+    const keyById = new Map(keys.map((k) => [k.id, k]));
+    return members
+      .map((m) => {
+        const key = keyById.get(m.tenant_provider_id);
+        return {
+          room: roomOfLabel(key?.label ?? ''),
+          tenant_provider_id: m.tenant_provider_id,
+          label: key?.label ?? 'Unknown',
+          provider: key?.provider ?? 'unknown',
+        };
+      })
+      .sort((a, b) => a.room.localeCompare(b.room) || a.label.localeCompare(b.label));
+  }
+
+  /**
+   * Apply the wallet's key bindings: the wallet ends up with EXACTLY these
+   * keys. A key that moves to this wallet is detached from the wallet it was
+   * on before (a key serves one wallet only).
+   */
+  private async applyBindings(
+    tenantId: string,
+    walletId: string,
+    desired: Array<{ room: string; tenant_provider_id: string }>,
+  ): Promise<void> {
+    const wanted = new Set(desired.map((d) => d.tenant_provider_id));
+    const current = await this.memberRepo.find({ where: { wallet_id: walletId, tenant_id: tenantId } });
+    for (const member of current) {
+      if (!wanted.has(member.tenant_provider_id)) {
+        await this.memberRepo.delete({ wallet_id: walletId, tenant_provider_id: member.tenant_provider_id });
+      }
+    }
+    const have = new Set(current.map((m) => m.tenant_provider_id));
+    const now = new Date().toISOString();
+    for (const id of wanted) {
+      if (have.has(id)) continue;
+      // Detach from any other wallet first: one key serves one wallet.
+      await this.memberRepo.delete({ tenant_provider_id: id });
+      await this.memberRepo.insert(
+        Object.assign(new WalletMember(), {
+          wallet_id: walletId,
+          tenant_provider_id: id,
+          tenant_id: tenantId,
+          created_at: now,
+        }),
+      );
+    }
+  }
+
+  private toView(
+    walletId: string,
+    tenantId: string,
+    row?: WalletSettings | null,
+    bindings: WalletKeyBinding[] = [],
+  ): WalletSettingsView {
     if (!row) {
       return {
         wallet_id: walletId,
@@ -236,6 +393,10 @@ export class WalletConsoleService {
         parked: false,
         kill_switch_fallback: false,
         daily_lines: null,
+        reserve_pct: null,
+        rollover_enabled: true,
+        cross_class_pause: false,
+        key_bindings: bindings,
         updated_at: null as unknown as string,
         updated_by_user_id: null,
       };
@@ -248,13 +409,20 @@ export class WalletConsoleService {
       parked: row.parked,
       kill_switch_fallback: row.kill_switch_fallback,
       daily_lines: row.daily_lines ?? null,
+      reserve_pct: row.reserve_pct ?? null,
+      rollover_enabled: row.rollover_enabled ?? true,
+      cross_class_pause: row.cross_class_pause ?? false,
+      key_bindings: bindings,
       updated_at: row.updated_at,
       updated_by_user_id: row.updated_by_user_id ?? null,
     };
   }
 
   /** Validate the patch at the trust boundary; unknown fields are rejected. */
-  private validatePatch(input: UpdateWalletSettingsInput): Partial<WalletSettingsView> {
+  private async validatePatch(
+    tenantId: string,
+    input: UpdateWalletSettingsInput,
+  ): Promise<Partial<WalletSettingsView>> {
     const patch: Partial<WalletSettingsView> = {};
     if (input?.drain_day_enabled !== undefined) {
       if (typeof input.drain_day_enabled !== 'boolean') {
@@ -272,6 +440,18 @@ export class WalletConsoleService {
       }
       patch.kill_switch_fallback = input.kill_switch_fallback;
     }
+    if (input?.rollover_enabled !== undefined) {
+      if (typeof input.rollover_enabled !== 'boolean') {
+        throw new BadRequestException('rollover_enabled must be a boolean');
+      }
+      patch.rollover_enabled = input.rollover_enabled;
+    }
+    if (input?.cross_class_pause !== undefined) {
+      if (typeof input.cross_class_pause !== 'boolean') {
+        throw new BadRequestException('cross_class_pause must be a boolean');
+      }
+      patch.cross_class_pause = input.cross_class_pause;
+    }
     if (input?.priority !== undefined) {
       const priority = input.priority;
       if (typeof priority !== 'number' || !Number.isFinite(priority)) {
@@ -284,10 +464,60 @@ export class WalletConsoleService {
       }
       patch.priority = Math.trunc(priority);
     }
+    if (input?.reserve_pct !== undefined) {
+      if (input.reserve_pct === null) {
+        patch.reserve_pct = null;
+      } else {
+        const reserve = input.reserve_pct;
+        if (typeof reserve !== 'number' || !Number.isFinite(reserve)) {
+          throw new BadRequestException('reserve_pct must be a number');
+        }
+        if (reserve < 0 || reserve > 100) {
+          throw new BadRequestException('reserve_pct must be between 0 and 100');
+        }
+        patch.reserve_pct = reserve;
+      }
+    }
     if (input?.daily_lines !== undefined) {
       patch.daily_lines = this.validateLines(input.daily_lines);
     }
+    if (input?.key_bindings !== undefined) {
+      patch.key_bindings = await this.validateBindings(tenantId, input.key_bindings);
+    }
     return patch;
+  }
+
+  /** Key bindings must name registered keys of THIS tenant, one per room. */
+  private async validateBindings(
+    tenantId: string,
+    raw: Array<{ room: string; tenant_provider_id: string }>,
+  ): Promise<WalletKeyBinding[]> {
+    if (!Array.isArray(raw)) throw new BadRequestException('key_bindings must be an array');
+    const out: WalletKeyBinding[] = [];
+    const seenRooms = new Set<string>();
+    for (const entry of raw) {
+      if (!entry || typeof entry !== 'object') {
+        throw new BadRequestException('key_bindings entries must be objects');
+      }
+      const id = entry.tenant_provider_id;
+      if (typeof id !== 'string' || id.trim() === '') {
+        throw new BadRequestException('key_bindings.tenant_provider_id must be a key id');
+      }
+      const key = await this.providerRepo.findOne({ where: { id, tenant_id: tenantId } });
+      if (!key) throw new BadRequestException(`Unknown provider key: ${id}`);
+      const room = roomOfLabel(key.label);
+      if (seenRooms.has(room)) {
+        throw new BadRequestException(`Only one key per room is allowed (${room})`);
+      }
+      seenRooms.add(room);
+      out.push({
+        room,
+        tenant_provider_id: id,
+        label: key.label,
+        provider: key.provider,
+      });
+    }
+    return out.sort((a, b) => a.room.localeCompare(b.room));
   }
 
   private validateLines(raw: WalletDailyLines | null): WalletDailyLines | null {
@@ -314,7 +544,11 @@ export class WalletConsoleService {
       before.priority !== after.priority ||
       before.parked !== after.parked ||
       before.kill_switch_fallback !== after.kill_switch_fallback ||
-      JSON.stringify(before.daily_lines ?? null) !== JSON.stringify(after.daily_lines ?? null)
+      before.reserve_pct !== after.reserve_pct ||
+      before.rollover_enabled !== after.rollover_enabled ||
+      before.cross_class_pause !== after.cross_class_pause ||
+      JSON.stringify(before.daily_lines ?? null) !== JSON.stringify(after.daily_lines ?? null) ||
+      JSON.stringify(before.key_bindings ?? null) !== JSON.stringify(after.key_bindings ?? null)
     );
   }
 
@@ -328,8 +562,21 @@ export class WalletConsoleService {
     if (before.kill_switch_fallback !== after.kill_switch_fallback) {
       parts.push(`kill_switch_fallback ${before.kill_switch_fallback} -> ${after.kill_switch_fallback}`);
     }
+    if (before.reserve_pct !== after.reserve_pct) {
+      parts.push(`reserve_pct ${before.reserve_pct ?? 'governor'} -> ${after.reserve_pct ?? 'governor'}`);
+    }
+    if (before.rollover_enabled !== after.rollover_enabled) {
+      parts.push(`rollover_enabled ${before.rollover_enabled} -> ${after.rollover_enabled}`);
+    }
+    if (before.cross_class_pause !== after.cross_class_pause) {
+      parts.push(`cross_class_pause ${before.cross_class_pause} -> ${after.cross_class_pause}`);
+    }
     if (JSON.stringify(before.daily_lines ?? null) !== JSON.stringify(after.daily_lines ?? null)) {
       parts.push('daily_lines updated');
+    }
+    if (JSON.stringify(before.key_bindings ?? null) !== JSON.stringify(after.key_bindings ?? null)) {
+      const names = after.key_bindings.map((b) => `${b.room}:${b.label}`).join(', ');
+      parts.push(`key bindings updated (${names || 'none'})`);
     }
     return parts.length > 0 ? parts.join('; ') : 'settings updated';
   }

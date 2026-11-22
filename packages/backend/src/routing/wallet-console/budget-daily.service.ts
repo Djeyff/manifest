@@ -1,9 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import { readRationState, RationDecision } from './ration-state';
+import { readRationState, RationDecision, RationRollover, RationState } from './ration-state';
 import { WalletConsoleService } from './wallet-console.service';
 
 /**
- * Daily budget view (RET-720 scope c).
+ * Daily budget view (RET-720 scope c → D-2026-11-22-11).
  *
  * The line math is NOT re-implemented here: today's used-vs-allowed numbers
  * are read from the published RET-670-V3 governor state (base + rollover
@@ -11,10 +11,19 @@ import { WalletConsoleService } from './wallet-console.service';
  * governor decided, plus the wallet's own settings, so the console can never
  * disagree with the governor about the line.
  *
+ * The allowance-engine state (reserve, rollover accumulation, the reset-day
+ * anchor and the projected end-of-day position) is derived HERE, on the
+ * server, from the governor's own published numbers — the browser never does
+ * budget arithmetic.
+ *
  * A wallet parked from the console IS reflected here: `halted` becomes true
  * for the accounts its keys belong to — that is how a settings write lands in
  * the governor state on the next tick.
  */
+
+/** The governor's own working day length (it publishes "over the ~18h working day"). */
+export const WORKING_DAY_HOURS = 18;
+
 export interface DailyBudgetAccount {
   account: string;
   keys: string[];
@@ -26,8 +35,22 @@ export interface DailyBudgetAccount {
   base_pct: number | null;
   rollover_pool_pct: number | null;
   floor_pct: number | null;
+  /** Owner reserve held back today (% of the weekly pool). */
+  reserve_pct: number | null;
+  /** Reserve accrued at the last day lift ((N-1) x 4.2857%/day). */
+  accrued_at_lift_pct: number | null;
+  /** Reserve locked by reservation holds. */
+  reserved_pct: number | null;
+  reservation_holds: number | null;
+  /** Usable pool the governor publishes (allowed minus holds). */
+  available_pct: number | null;
   weekly_headroom_pct: number | null;
   five_h_headroom_pct: number | null;
+  /** % of the weekly pool already spent (provider-own). */
+  spent_week_pct: number | null;
+  /** Denomination of the pool (credits / tokens). */
+  weekly_pool: number | null;
+  denomination: string | null;
   drain_day: boolean;
   drain_window: boolean;
   allow: boolean;
@@ -35,9 +58,52 @@ export interface DailyBudgetAccount {
   day_number: number | null;
   day_index: number | null;
   ration_model: string | null;
+  release_stage: string | null;
+  binding_dimension: string | null;
+  capped_by_floor: boolean;
+  final_hour: boolean;
   reasons: string[];
   /** Set when a console setting (park) overrides the governor decision. */
   halted_by_console: boolean;
+  /** Reset anchor of this wallet's own window (provider-own). */
+  anchor: {
+    epoch: number | null;
+    source: string | null;
+    stale: boolean;
+    note: string | null;
+  } | null;
+  /** Epoch the current ration day started (the day-window anchor). */
+  day_epoch: number | null;
+  /** UTC "HH:MM" the ration day starts at. */
+  day_start_utc: string | null;
+  /** Hours elapsed inside the current ration day. */
+  day_elapsed_hours: number | null;
+  /** Current burn rate in % of the weekly pool per hour. */
+  pace_pct_per_h: number | null;
+  /** Projected spend at the end of the working day, at the current pace. */
+  projected_end_pct: number | null;
+  /** Working hours left in the day. */
+  working_hours_left: number | null;
+}
+
+/** The allowance engine (rollover + membership) as the governor publishes it. */
+export interface AllowanceEngine {
+  rollover_enabled: boolean;
+  rollover_model: string | null;
+  rollover_mode: string | null;
+  rollover_active: string | null;
+  rollover_reason: string | null;
+  primary: string | null;
+  primary_usable_pct: number | null;
+  backup: string | null;
+  backup_usable_pct: number | null;
+  backup_membership_active: boolean;
+  backup_membership_end: string | null;
+  new_ration_day: boolean;
+  week_start: string | null;
+  day_start_utc: string | null;
+  day_epoch: string | null;
+  enforce_tick_at: string | null;
 }
 
 export interface DailyBudgetWallet {
@@ -57,6 +123,17 @@ export interface DailyBudget {
   ration_updated_at: string | null;
   accounts: DailyBudgetAccount[];
   wallets: DailyBudgetWallet[];
+  /** Allowance-engine state (rollover / membership / anchors). */
+  engine: AllowanceEngine | null;
+}
+
+function isoOrNull(epoch: number | null | undefined): string | null {
+  if (typeof epoch !== 'number' || !Number.isFinite(epoch)) return null;
+  return new Date(epoch * 1000).toISOString();
+}
+
+function num(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 @Injectable()
@@ -89,10 +166,29 @@ export class BudgetDailyService {
       });
     }
 
+    const nowMs = Date.now();
     const accounts: DailyBudgetAccount[] = Object.entries(ration.accounts).map(
       ([name, status]) => {
         const decision: RationDecision = status.decision ?? {};
         const haltedByConsole = parkedAccounts.has(name);
+
+        const dayEpoch = ration.day_epoch ?? null;
+        const elapsedHours =
+          dayEpoch === null ? null : Math.max(0, (nowMs / 1000 - dayEpoch) / 3600);
+        const used = num(decision.spent_today_pct ?? status.spent_today_pct);
+        const workingHoursLeft =
+          elapsedHours === null ? null : Math.max(0, WORKING_DAY_HOURS - elapsedHours);
+        const pace =
+          elapsedHours === null || elapsedHours <= 0 || used === null
+            ? null
+            : used / elapsedHours;
+        const projected =
+          pace === null || workingHoursLeft === null || used === null
+            ? null
+            : used + pace * workingHoursLeft;
+
+        const anchor = decision.anchor ?? null;
+
         return {
           account: name,
           keys: status.acct_keys ?? [],
@@ -102,8 +198,16 @@ export class BudgetDailyService {
           base_pct: decision.base_pct ?? null,
           rollover_pool_pct: decision.rollover_pool_pct ?? null,
           floor_pct: decision.floor_pct ?? null,
+          reserve_pct: decision.reserve_pct ?? null,
+          accrued_at_lift_pct: decision.accrued_at_lift_pct ?? null,
+          reserved_pct: decision.reserved_pct ?? null,
+          reservation_holds: decision.reservation_holds ?? null,
+          available_pct: decision.available_pct ?? null,
           weekly_headroom_pct: decision.weekly_headroom_pct ?? null,
           five_h_headroom_pct: decision.five_h_headroom_pct ?? null,
+          spent_week_pct: status.spent_week_pct ?? null,
+          weekly_pool: status.weekly_pool ?? null,
+          denomination: status.denomination ?? null,
           drain_day: decision.drain_day ?? false,
           drain_window: decision.drain_window ?? false,
           allow: haltedByConsole ? false : (decision.allow ?? false),
@@ -111,8 +215,27 @@ export class BudgetDailyService {
           day_number: decision.day_number ?? null,
           day_index: decision.day_index ?? null,
           ration_model: decision.ration_model ?? null,
+          release_stage: decision.release_stage ?? null,
+          binding_dimension: decision.binding_dimension ?? null,
+          capped_by_floor: decision.capped_by_floor ?? false,
+          final_hour: decision.final_hour ?? false,
           reasons: decision.reasons ?? [],
           halted_by_console: haltedByConsole,
+          anchor: anchor
+            ? {
+                epoch: num(anchor.anchor_epoch),
+                source: anchor.source ?? null,
+                stale: anchor.stale ?? false,
+                note: anchor.note ?? null,
+              }
+            : null,
+          day_epoch: dayEpoch,
+          day_start_utc: ration.day_start_utc,
+          day_elapsed_hours: elapsedHours === null ? null : Number(elapsedHours.toFixed(3)),
+          pace_pct_per_h: pace === null ? null : Number(pace.toFixed(4)),
+          projected_end_pct: projected === null ? null : Number(projected.toFixed(3)),
+          working_hours_left:
+            workingHoursLeft === null ? null : Number(workingHoursLeft.toFixed(3)),
         };
       },
     );
@@ -124,6 +247,31 @@ export class BudgetDailyService {
       ration_updated_at: ration.updated_at,
       accounts,
       wallets,
+      engine: this.engine(ration),
+    };
+  }
+
+  /** The allowance engine as published: rollover membership + the day anchors. */
+  private engine(ration: RationState): AllowanceEngine | null {
+    const rollover: RationRollover | null = ration.rollover;
+    if (!ration.available) return null;
+    return {
+      rollover_enabled: rollover?.enabled ?? false,
+      rollover_model: rollover?.model ?? null,
+      rollover_mode: rollover?.mode ?? null,
+      rollover_active: rollover?.active ?? null,
+      rollover_reason: rollover?.reason ?? null,
+      primary: rollover?.primary ?? null,
+      primary_usable_pct: rollover?.primary_usable_pct ?? null,
+      backup: rollover?.backup ?? null,
+      backup_usable_pct: rollover?.backup_usable_pct ?? null,
+      backup_membership_active: rollover?.backup_membership_active ?? false,
+      backup_membership_end: rollover?.backup_membership_end ?? null,
+      new_ration_day: rollover?.new_ration_day ?? false,
+      week_start: isoOrNull(ration.week_start),
+      day_start_utc: ration.day_start_utc,
+      day_epoch: isoOrNull(ration.day_epoch),
+      enforce_tick_at: ration.enforce_tick?.at ?? null,
     };
   }
 }

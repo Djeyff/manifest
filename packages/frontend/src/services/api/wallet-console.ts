@@ -1,6 +1,5 @@
 import { fetchMutate } from './core';
 import {
-  ConsoleUnavailableError,
   loadLiveConsole,
   mapLoadBalancerResponse,
   mapProgressResponse,
@@ -11,17 +10,17 @@ import {
 } from './wallet-console-live';
 
 /**
- * Wallet console (RET-721) — the owner-only console on mnfs.retena.app.
+ * Wallet console (RET-721 → D-2026-11-22-11) — the owner-only console.
  *
  * Contract notes:
  * - Every budget number in here is SERVER-PROVIDED. The console never does
  *   budget arithmetic on the client: `allowed_pct`, `used_pct` and
  *   `projected_pct` arrive already computed, together with the component
- *   strips that spell the arithmetic out (base + rollover + reserve − floor).
- *   The UI renders those strips verbatim.
- * - The live API (RET-720) may not be deployed yet. When it is missing the
- *   console falls back to the demo payload below and labels itself
- *   `demo: true` so the owner can tell demo data from live data.
+ *   strips that spell the arithmetic out. The UI renders those strips verbatim.
+ * - There is NO fixture and NO fallback payload in this module. When the live
+ *   API is missing or refuses the caller, the error is surfaced verbatim to
+ *   the owner. A console that invents numbers is worse than a console that
+ *   says "not available".
  */
 
 export interface WalletFormulaStrip {
@@ -38,6 +37,8 @@ export interface WalletFormulaStrip {
 export interface WalletLine {
   wallet_id: string;
   name: string;
+  /** Display form, e.g. "MAIN (Z.AI Max)". */
+  display_name: string;
   color: string;
   provider: string;
   /** Component values (server-computed). */
@@ -45,7 +46,7 @@ export interface WalletLine {
   rollover_pct: number;
   reserve_pct: number;
   floor_pct: number;
-  /** Server-computed result of base + rollover + reserve − floor. */
+  /** Server-computed result of the day's line. */
   allowed_pct: number;
   formula: WalletFormulaStrip;
   /** Underlying USD lines, when the wallet is governed by them. */
@@ -84,8 +85,6 @@ export interface WalletPriorityRow {
 }
 
 export interface WalletSettingsResponse {
-  /** True when the payload is the built-in demo fallback, not live data. */
-  demo: boolean;
   week_anchor?: string | null;
   night_window?: string | null;
   lines: WalletLine[];
@@ -102,9 +101,87 @@ export interface WalletSettingsResponse {
   } | null;
 }
 
+/** One provider-own window the wallet still has left. */
+export interface WindowHeadroom {
+  /** % of the window still available (provider-own reading). */
+  pct_left: number | null;
+  /** Provider-own reset stamp (ISO) — never a wall-clock anchor. */
+  reset_at: string | null;
+  /** Short label of the reset stamp. */
+  resets_label: string | null;
+}
+
+/** The allowance engine state the governor publishes. */
+export interface AllowanceEngineView {
+  rollover_enabled: boolean;
+  rollover_model: string | null;
+  rollover_mode: string | null;
+  rollover_active: string | null;
+  rollover_reason: string | null;
+  primary: string | null;
+  primary_usable_pct: number | null;
+  backup: string | null;
+  backup_usable_pct: number | null;
+  backup_membership_active: boolean;
+  backup_membership_end: string | null;
+  new_ration_day: boolean;
+  week_start: string | null;
+  day_start_utc: string | null;
+  day_epoch: string | null;
+  enforce_tick_at: string | null;
+}
+
+/**
+ * One wallet's day line as the governor decided it — the balancer's unit.
+ * Every field is server-computed; the page renders them verbatim.
+ */
+export interface DayLineView {
+  wallet_id: string;
+  name: string;
+  display_name: string;
+  provider: string;
+  account: string | null;
+  /** Governor day number ("day 3"), never a wall-clock midnight. */
+  day_label: string | null;
+  /** % of the weekly pool the governor allows today. */
+  allowed_pct: number | null;
+  /** % of the weekly pool spent today. */
+  used_pct: number | null;
+  /** % of the weekly pool still allowed today. */
+  remaining_pct: number | null;
+  base_pct: number | null;
+  rollover_pct: number | null;
+  /** Owner reserve held back today (% of the weekly pool). */
+  reserve_pct: number | null;
+  /** Reserve accrued at the last day lift. */
+  accrued_at_lift_pct: number | null;
+  /** Usable pool after reservation holds. */
+  available_pct: number | null;
+  floor_pct: number | null;
+  /** Current burn rate (% of the weekly pool per hour). */
+  pace_pct_per_h: number | null;
+  /** Projected spend at the end of the working day, at the current pace. */
+  projected_end_pct: number | null;
+  /** Working hours left in the ration day. */
+  working_hours_left: number | null;
+  /** Hours elapsed inside the ration day. */
+  day_elapsed_hours: number | null;
+  /** The ration day's reset anchor (epoch, ISO and label). */
+  day_epoch: number | null;
+  day_start_utc: string | null;
+  /** Provider-own anchor note (e.g. the provider reset stamp). */
+  anchor_note: string | null;
+  anchor_source: string | null;
+  anchor_stale: boolean;
+  /** Provider-own windows for this wallet. */
+  five_h: WindowHeadroom;
+  weekly: WindowHeadroom;
+}
+
 export interface LoadBalancerCard {
   wallet_id: string;
   name: string;
+  display_name: string;
   provider: string;
   state: { label: string; tone: 'ok' | 'warn' | 'danger' | 'neutral' };
   lane_tags: string[];
@@ -119,16 +196,23 @@ export interface LoadBalancerCard {
 }
 
 export interface LoadBalancerResponse {
-  demo: boolean;
   admission: { label: string; tone: 'ok' | 'warn' | 'danger' | 'neutral' };
   cards: LoadBalancerCard[];
   provider_state: Array<{ provider: string; value: string }>;
   lane_targets?: { target_band: string } | null;
+  /** The allowance engine the governor published (rollover, anchors, ticks). */
+  engine: AllowanceEngineView | null;
+  /** One day line per wallet — the allowance engine's per-wallet state. */
+  day_lines: DayLineView[];
+  /** The engine's last enforcement tick. */
+  enforce_tick_at: string | null;
 }
 
 export interface ProgressBlock {
   wallet_id: string;
   name: string;
+  /** Display form, e.g. "MAIN (Z.AI Max)". */
+  display_name: string;
   color: string;
   provider: string;
   used_pct: number;
@@ -161,6 +245,27 @@ export interface ProgressBlock {
   published: boolean;
   /** Why the block has no line, in the server's own words. */
   published_note?: string | null;
+  /** Provider-own 5-hour window headroom (never polled from the browser). */
+  five_h: WindowHeadroom;
+  /** Provider-own weekly window headroom. */
+  weekly: WindowHeadroom;
+  /** % of the weekly pool already spent (provider-own). */
+  spent_week_pct: number | null;
+  /** The weekly pool in the provider's own denomination. */
+  weekly_pool: number | null;
+  denomination: string | null;
+  /** Burn pace (% of the weekly pool per hour) and the projected reset-day end. */
+  pace_pct_per_h: number | null;
+  projected_end_pct: number | null;
+  working_hours_left: number | null;
+  /** Reserve, accrued reserve and the rollover pool for this day. */
+  reserve_pct: number | null;
+  accrued_at_lift_pct: number | null;
+  rollover_pct: number | null;
+  /** The ration day's reset anchor. */
+  day_start_utc: string | null;
+  anchor_note: string | null;
+  anchor_stale: boolean;
 }
 
 export interface BurnMeter {
@@ -185,7 +290,6 @@ export interface HeatmapWeek {
 }
 
 export interface ProgressResponse {
-  demo: boolean;
   blocks: ProgressBlock[];
   burn: BurnMeter;
   heatmap: { weeks: HeatmapWeek[]; note?: string | null };
@@ -204,406 +308,41 @@ export interface ProgressResponse {
 
 export interface AskCrewResponse {
   ok: boolean;
-  demo: boolean;
   card_ref?: string | null;
 }
 
 export interface WalletConsoleAccess {
   /** True when the signed-in user owns the tenant. */
   owner: boolean;
-  demo: boolean;
+  /** True when the live console surface answered. */
+  available: boolean;
 }
-
-const DEMO_STAMP = '2026-11-21T00:24:00.000Z';
-
-function demoFormula(
-  label: string,
-  base: number,
-  rollover: number,
-  reserve: number,
-  floor: number,
-  allowed: number,
-): WalletFormulaStrip {
-  return {
-    label,
-    terms: [
-      { op: '', label: 'base', value: base, unit: '%' },
-      { op: '+', label: 'rollover carried in', value: rollover, unit: '%' },
-      { op: '+', label: 'daily reserve', value: reserve, unit: '%' },
-      { op: '−', label: 'emergency floor', value: floor, unit: '%' },
-    ],
-    result: { label: `${label} =`, value: allowed, unit: '%' },
-    ruling_id: 'D-2026-11-19-04',
-  };
-}
-
-export const DEMO_SETTINGS: WalletSettingsResponse = {
-  demo: true,
-  week_anchor: 'Mon 00:00Z',
-  night_window: '00:00–05:00 UTC-4',
-  lines: [
-    {
-      wallet_id: 'w-main',
-      name: 'MAIN',
-      color: 'main',
-      provider: 'zai-max',
-      base_pct: 10.0,
-      rollover_pct: 4.3,
-      reserve_pct: 4.3,
-      floor_pct: 4.0,
-      allowed_pct: 14.6,
-      formula: demoFormula('today allowed', 10.0, 4.3, 4.3, 4.0, 14.6),
-      resets_at: '2026-11-21T07:13:00.000Z',
-      resets_label: 'Fri 07:13Z',
-      reset_hint: 'Resets weekly Fri 07:13Z (provider stamp).',
-    },
-    {
-      wallet_id: 'w-mm',
-      name: 'MM',
-      color: 'mm',
-      provider: 'minimax',
-      base_pct: 10.0,
-      rollover_pct: 2.1,
-      reserve_pct: 4.3,
-      floor_pct: 4.0,
-      allowed_pct: 12.4,
-      formula: demoFormula('today allowed', 10.0, 2.1, 4.3, 4.0, 12.4),
-      resets_at: '2026-11-22T00:00:00.000Z',
-      resets_label: 'Sat 00:00Z',
-      reset_hint: 'Resets Sat 00:00Z — the tightest line we carry.',
-    },
-    {
-      wallet_id: 'w-backup',
-      name: 'BACKUP',
-      color: 'backup',
-      provider: 'zai-pro',
-      base_pct: 10.0,
-      rollover_pct: 0.0,
-      reserve_pct: 4.3,
-      floor_pct: 4.0,
-      allowed_pct: 10.3,
-      formula: demoFormula('today allowed', 10.0, 0.0, 4.3, 4.0, 10.3),
-      resets_at: '2026-11-22T00:00:00.000Z',
-      resets_label: 'Sat 00:00Z',
-      reset_hint: 'Held in reserve; draws only when MAIN and MM are capped.',
-      note: 'Finite spare — roughly 9% of the reserve is left and there is no refill. Gone after early Dec.',
-    },
-  ],
-  behaviour: {
-    drain_auto_lift: true,
-    parked: false,
-    kill_switch_to_fallback: false,
-    budget_mode: 'enforce',
-    budget_mode_source: 'MANIFEST_WALLET_BUDGET_MODE',
-  },
-  priority: [
-    {
-      wallet_id: 'w-main',
-      name: 'MAIN · zai-max',
-      rank: 1,
-      lane_tags: ['RCR', 'CCR'],
-      lane_tags_live: true,
-      pill: { label: 'primary', tone: 'neutral' },
-    },
-    {
-      wallet_id: 'w-mm',
-      name: 'MM · minimax',
-      rank: 2,
-      lane_tags: ['RCR MM', 'CCR MM'],
-      lane_tags_live: true,
-      pill: { label: '48% left', tone: 'warn' },
-    },
-    {
-      wallet_id: 'w-backup',
-      name: 'BACKUP · zai-pro',
-      rank: 3,
-      lane_tags: ['RCR Backup', 'CCR Backup'],
-      pill: { label: 'standby', tone: 'neutral' },
-    },
-  ],
-  audit: [
-    { at: '2026-11-21T00:04:00.000Z', summary: 'MAIN rollover set 4.3%', ruling_id: 'D-2026-11-21-03' },
-    {
-      at: '2026-11-20T21:21:00.000Z',
-      summary: 'Budget mode → enforce, 5 wallet lines seeded',
-      ruling_id: 'D-2026-11-20-10',
-    },
-    {
-      at: '2026-11-20T17:02:00.000Z',
-      summary: 'Drain-day auto-lift enabled on all wallets',
-      ruling_id: 'D-2026-11-20-09',
-    },
-    {
-      at: '2026-11-19T23:23:00.000Z',
-      summary: 'Daily line doctrine corrected: base + reserve + rollover',
-      ruling_id: 'D-2026-11-19-04',
-    },
-  ],
-  members: [
-    { wallet: 'MAIN members', keys: 'RCR, CCR' },
-    { wallet: 'MM members', keys: 'RCR MM, CCR MM' },
-    { wallet: 'BACKUP members', keys: 'RCR Backup, CCR Backup' },
-  ],
-  governor_tick: { at: DEMO_STAMP, mode: 'enforce', allowed_pct: 14.6, used_pct: 9.1 },
-};
-
-export const DEMO_BALANCER: LoadBalancerResponse = {
-  demo: true,
-  admission: { label: 'admission live', tone: 'ok' },
-  cards: [
-    {
-      wallet_id: 'w-main',
-      name: 'MAIN',
-      provider: 'zai-max',
-      state: { label: 'drawing', tone: 'ok' },
-      lane_tags: ['RCR', 'CCR'],
-      lane_tags_live: true,
-      in_flight: 8,
-      ceiling: 10,
-      window: { pct_left: 84, resets_label: 'resets 2h 41m' },
-      weekly: { pct_left: 97, resets_label: 'resets Fri 07:13Z' },
-      priority: 1,
-      priority_hint: 'primary draw',
-      provider_state: { label: 'no halt', tone: 'ok', detail: 'last error 1302 ×116' },
-    },
-    {
-      wallet_id: 'w-mm',
-      name: 'MM',
-      provider: 'minimax',
-      state: { label: 'draining', tone: 'warn' },
-      lane_tags: ['RCR MM', 'CCR MM'],
-      lane_tags_live: true,
-      in_flight: 3,
-      ceiling: 10,
-      window: { pct_left: 97, resets_label: 'resets 1h 52m' },
-      weekly: { pct_left: 48, resets_label: 'resets Sat 00:00Z' },
-      priority: 2,
-      priority_hint: 'volume worker target',
-      provider_state: { label: 'backoff 30s', tone: 'warn', detail: '1310 ×162 · retry-after hint ×2' },
-    },
-    {
-      wallet_id: 'w-backup',
-      name: 'BACKUP',
-      provider: 'zai-pro',
-      state: { label: 'standby', tone: 'neutral' },
-      lane_tags: ['RCR Backup', 'CCR Backup'],
-      in_flight: 0,
-      ceiling: 10,
-      window: { pct_left: 81, resets_label: 'resets 3h 04m' },
-      weekly: { pct_left: 70, resets_label: 'resets Nov 25 06:44Z' },
-      priority: 3,
-      priority_hint: 'draws only when capped',
-      provider_state: { label: 'no halt', tone: 'ok', detail: 'clean' },
-    },
-  ],
-  provider_state: [
-    { provider: 'zai-max', value: 'ok · 1302 ×116' },
-    { provider: 'minimax', value: 'backoff 30s · 1310 ×162' },
-    { provider: 'zai-pro', value: 'ok · clean' },
-    { provider: 'Last halt', value: 'none since 04:12Z' },
-    { provider: 'Fallback key', value: 'armed' },
-  ],
-  lane_targets: { target_band: '8–10 lanes' },
-};
-
-export const DEMO_PROGRESS: ProgressResponse = {
-  demo: true,
-  available: true,
-  blocks: [
-    {
-      wallet_id: 'w-main',
-      name: 'MAIN',
-      color: 'main',
-      provider: 'zai-max',
-      account: 'zai-max',
-      day_label: 'day 3 of 7',
-      published: true,
-      used_pct: 9.1,
-      allowed_pct: 14.6,
-      projected_pct: 13.8,
-      still_allowed_pct: 5.5,
-      floor_pct: 4.0,
-      pace: 'on-pace',
-      badges: ['drain-day · 85% lift active'],
-      formula: demoFormula('today allowed', 10.0, 4.3, 4.3, 4.0, 14.6),
-      resets_label: 'resets Fri 07:13Z',
-      reset_hint: '6h 49m left',
-    },
-    {
-      wallet_id: 'w-mm',
-      name: 'MM',
-      color: 'mm',
-      provider: 'minimax',
-      account: 'minimax',
-      day_label: 'day 3 of 7',
-      published: true,
-      used_pct: 11.2,
-      allowed_pct: 12.4,
-      projected_pct: 24.6,
-      still_allowed_pct: 1.2,
-      floor_pct: 4.0,
-      pace: 'behind',
-      badges: [],
-      formula: demoFormula('today allowed', 10.0, 2.1, 4.3, 4.0, 12.4),
-      resets_label: 'resets Sat 00:00Z',
-      reset_hint: '23h 36m left',
-      note: 'Behind pace. At the current rate MM projects to 24.6% of its line by reset — double its 12.4% allowance. The floor is still untouched (4.0% locked), so this is a pace problem, not a budget breach.',
-    },
-    {
-      wallet_id: 'w-backup',
-      name: 'BACKUP',
-      color: 'backup',
-      provider: 'zai-pro',
-      account: 'zai-pro',
-      day_label: 'day 3 of 7',
-      published: true,
-      used_pct: 0.4,
-      allowed_pct: 10.3,
-      projected_pct: 1.1,
-      still_allowed_pct: 9.9,
-      floor_pct: 4.0,
-      pace: 'ahead',
-      badges: [],
-      formula: demoFormula('today allowed', 10.0, 0.0, 4.3, 4.0, 10.3),
-      resets_label: 'resets Sat 00:00Z',
-      reset_hint: '23h 36m left · standby',
-    },
-  ],
-  burn: {
-    in_flight: 8,
-    recommended: 7,
-    quota_headroom_pct: 72,
-    target_band: '8–10 lanes',
-    verdict: 'slow by 1',
-    advisory: true,
-  },
-  heatmap: {
-    weeks: [
-      {
-        label: 'W-3',
-        cells: [
-          { pct: 92, state: 'on' },
-          { pct: 118, state: 'over' },
-          { pct: 104, state: 'on' },
-          { pct: 61, state: 'under' },
-          { pct: 141, state: 'burn' },
-          { pct: 99, state: 'on' },
-          { pct: 44, state: 'under' },
-        ],
-      },
-      {
-        label: 'W-2',
-        cells: [
-          { pct: 97, state: 'on' },
-          { pct: 88, state: 'on' },
-          { pct: 126, state: 'over' },
-          { pct: 108, state: 'on' },
-          { pct: 163, state: 'burn' },
-          { pct: 112, state: 'over' },
-          { pct: 52, state: 'under' },
-        ],
-      },
-      {
-        label: 'W-1',
-        cells: [
-          { pct: 101, state: 'on' },
-          { pct: 94, state: 'on' },
-          { pct: 121, state: 'over' },
-          { pct: 110, state: 'on' },
-          { pct: 129, state: 'over' },
-          { pct: 106, state: 'on' },
-          { pct: 49, state: 'under' },
-        ],
-      },
-      {
-        label: 'This',
-        cells: [
-          { pct: 103, state: 'on' },
-          { pct: 96, state: 'on' },
-          { pct: 119, state: 'over' },
-          { pct: 112, state: 'on' },
-          { pct: 62, state: 'on' },
-          { pct: null, state: 'future' },
-          { pct: null, state: 'future' },
-        ],
-      },
-    ],
-    note: 'The pattern is the story: Thursday–Friday burn, Saturday sleeps. Weekends carry ~50% of a weekday, so the weekly line drains on the working days and rests when no one is asking.',
-  },
-  day_strip: [
-    { day: '08', pct: 44, drain: true },
-    { day: '09', pct: 52 },
-    { day: '10', pct: 38 },
-    { day: '11', pct: 71, over: true },
-    { day: '12', pct: 47 },
-    { day: '13', pct: 29 },
-    { day: '14', pct: 66, over: true },
-    { day: '15', pct: 41 },
-    { day: '16', pct: 55 },
-    { day: '17', pct: 48, drain: true },
-    { day: '18', pct: 33 },
-    { day: '19', pct: 58 },
-    { day: '20', pct: 74, over: true },
-    { day: '21', pct: 62 },
-  ],
-  audit: [
-    { at: '2026-11-21T00:04:00.000Z', summary: 'MAIN rollover set 4.3%', ruling_id: 'D-2026-11-21-03' },
-    {
-      at: '2026-11-20T17:02:00.000Z',
-      summary: 'Drain-day auto-lift enabled on all wallets',
-      ruling_id: 'D-2026-11-20-09',
-    },
-    {
-      at: '2026-11-19T23:23:00.000Z',
-      summary: 'Daily line doctrine corrected: base + reserve + rollover',
-      ruling_id: 'D-2026-11-19-04',
-    },
-  ],
-};
 
 /**
- * Transport notes (RET-721 → RET-720, commit 54047be73).
+ * Transport notes (RET-721 → RET-720).
  *
- * The console reads the REAL backend contract, not the fictional
- * `/wallets/console/*` routes:
+ * The console reads the REAL backend contract:
  *
  *   GET /wallets/:id/settings(+/audit)  ·  GET /quota-board  ·  GET /budgets/daily
  *
  * Failure classes are kept distinct, because they mean different things to
  * the owner:
- * - 403 → signed in, but not the tenant owner. Never falls back to demo.
- * - 404 → the console surface is not deployed (feature flag off). Falls back
- *   to the demo payload, flagged `demo: true`.
- * - anything else → a real error, re-thrown.
+ * - 403 → signed in, but not the tenant owner.
+ * - 404 → the console surface is not deployed (feature flag off).
+ * - anything else → a real error.
+ *
+ * None of them produce a substitute payload: the owner sees the truth.
  */
-async function withDemoFallback<T>(run: () => Promise<T>, fallback: T): Promise<T> {
-  try {
-    return await run();
-  } catch (err) {
-    if (err instanceof ConsoleUnavailableError) return fallback;
-    throw err;
-  }
+export async function getWalletSettings(): Promise<WalletSettingsResponse> {
+  return mapSettingsResponse(await loadLiveConsole());
 }
 
-export function getWalletSettings(): Promise<WalletSettingsResponse> {
-  return withDemoFallback(
-    async () => mapSettingsResponse(await loadLiveConsole()),
-    DEMO_SETTINGS,
-  );
+export async function getLoadBalancer(): Promise<LoadBalancerResponse> {
+  return mapLoadBalancerResponse(await loadLiveConsole());
 }
 
-export function getLoadBalancer(): Promise<LoadBalancerResponse> {
-  return withDemoFallback(
-    async () => mapLoadBalancerResponse(await loadLiveConsole()),
-    DEMO_BALANCER,
-  );
-}
-
-export function getDailyProgress(): Promise<ProgressResponse> {
-  return withDemoFallback(
-    async () => mapProgressResponse(await loadLiveConsole()),
-    DEMO_PROGRESS,
-  );
+export async function getDailyProgress(): Promise<ProgressResponse> {
+  return mapProgressResponse(await loadLiveConsole());
 }
 
 /**
@@ -611,23 +350,22 @@ export function getDailyProgress(): Promise<ProgressResponse> {
  * cheapest owner-gated read (it makes no provider poll), so it doubles as the
  * gate probe.
  *
- * - 200 → owner.
- * - 403 → signed in, not the owner: a real verdict, never demo.
- * - 404 → the console surface is not deployed: the demo build stays usable,
- *   flagged `demo: true` so the UI can label the gate as unverified.
+ * - 200 → owner, surface available.
+ * - 403 → signed in, not the owner: a real verdict.
+ * - 404 → the console surface is not deployed: `available: false`, so the UI
+ *   can say so instead of showing numbers it does not have.
  */
 export async function getWalletConsoleAccess(): Promise<WalletConsoleAccess> {
   try {
     const verdict = await probeOwner();
-    if (verdict.owner) return { owner: true, demo: false };
-    if (!verdict.available) return { owner: true, demo: true };
-    return { owner: false, demo: false };
+    if (verdict.owner) return { owner: true, available: true };
+    return { owner: false, available: verdict.available };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (/Unauthorized|Forbidden|session|401|403/i.test(message)) {
-      return { owner: false, demo: false };
+      return { owner: false, available: false };
     }
-    if (/404|Not Found/i.test(message)) return { owner: true, demo: true };
+    if (/404|Not Found/i.test(message)) return { owner: false, available: false };
     throw err;
   }
 }
@@ -647,83 +385,37 @@ export interface UpdateLineInput {
  * all come from the server rather than from the browser.
  */
 export async function updateWalletLine(input: UpdateLineInput): Promise<WalletSettingsResponse> {
-  try {
-    const response = await putWalletLine({
-      wallet_id: input.wallet_id,
-      base_pct: input.base_pct ?? 0,
-      rollover_pct: input.rollover_pct ?? 0,
-      // The floor is not sent: it is a locked server-side value and the
-      // console only ever displays it.
-      floor_pct: undefined,
-    });
-    const fresh = mapSettingsResponse(await loadLiveConsole());
-    const rulingId = rulingIdOf(response);
-    if (!rulingId) return fresh;
-    // The freshly-read audit trail carries the ruling id when the server
-    // published one; when it does not, surface the id the PUT returned so the
-    // owner still sees which ruling was minted for this change.
-    const audit = fresh.audit.map((entry) =>
-      entry.ruling_id === rulingId ? entry : { ...entry, ruling_id: entry.ruling_id ?? rulingId },
-    );
-    return { ...fresh, audit };
-  } catch (err) {
-    if (!(err instanceof ConsoleUnavailableError)) throw err;
-    // Demo mode: apply the change locally so the round-trip (governor tick,
-    // audit row, ruling) is still demonstrable without the live API.
-    const settings = structuredClone(DEMO_SETTINGS);
-    const line = settings.lines.find((l) => l.wallet_id === input.wallet_id);
-    if (!line) throw new Error('Unknown wallet line');
-    if (input.base_pct !== undefined) line.base_pct = input.base_pct;
-    if (input.rollover_pct !== undefined) line.rollover_pct = input.rollover_pct;
-    const allowed =
-      line.base_pct + line.rollover_pct + line.reserve_pct - line.floor_pct;
-    line.allowed_pct = allowed;
-    line.formula = {
-      ...line.formula,
-      terms: line.formula.terms.map((term) => {
-        if (term.label === 'base') return { ...term, value: line.base_pct };
-        if (term.label === 'rollover carried in') return { ...term, value: line.rollover_pct };
-        return term;
-      }),
-      result: { ...line.formula.result, value: allowed },
-    };
-    const at = new Date().toISOString();
-    settings.audit = [
-      {
-        at,
-        summary: `${line.name} line updated (base ${line.base_pct.toFixed(1)}%, rollover ${line.rollover_pct.toFixed(1)}%)`,
-        ruling_id: 'D-DEMO-LOCAL',
-      },
-      ...settings.audit,
-    ];
-    settings.governor_tick = {
-      at,
-      mode: settings.behaviour.budget_mode,
-      allowed_pct: allowed,
-      used_pct: settings.governor_tick?.used_pct ?? 0,
-    };
-    return settings;
-  }
+  const response = await putWalletLine({
+    wallet_id: input.wallet_id,
+    base_pct: input.base_pct ?? 0,
+    rollover_pct: input.rollover_pct ?? 0,
+    // The floor is not sent: it is a locked server-side value and the
+    // console only ever displays it.
+    floor_pct: undefined,
+  });
+  const fresh = mapSettingsResponse(await loadLiveConsole());
+  const rulingId = rulingIdOf(response);
+  if (!rulingId) return fresh;
+  // The freshly-read audit trail carries the ruling id when the server
+  // published one; when it does not, surface the id the PUT returned so the
+  // owner still sees which ruling was minted for this change.
+  const audit = fresh.audit.map((entry) =>
+    entry.ruling_id === rulingId ? entry : { ...entry, ruling_id: entry.ruling_id ?? rulingId },
+  );
+  return { ...fresh, audit };
 }
 
 /**
  * Files a needs-you card for the crew.
  *
- * RET-720 does not publish a filing route, so the console posts to the
- * console path and reports the truth: when nothing is listening, the filing
- * is a local hold (`demo: true`) rather than a fake crew card.
+ * When the server publishes no filing route the failure is surfaced to the
+ * owner — the console never pretends a card was filed.
  */
 export async function askCrew(message: string): Promise<AskCrewResponse> {
-  try {
-    const data = await fetchMutate<AskCrewResponse>('/wallets/console/ask-crew', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message }),
-    });
-    return { ...data, demo: false };
-  } catch (err) {
-    const messageText = err instanceof Error ? err.message : String(err);
-    if (!/API error: 404|API error: 501|Not Found/i.test(messageText)) throw err;
-    return { ok: true, demo: true, card_ref: 'needs-you (local hold — no filing route published)' };
-  }
+  const data = await fetchMutate<AskCrewResponse>('/wallets/console/ask-crew', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message }),
+  });
+  return { ...data, ok: data.ok !== false };
 }

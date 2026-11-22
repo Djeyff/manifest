@@ -50,6 +50,34 @@ export class WalletSettings {
   @Column('jsonb', { nullable: true, default: null })
   daily_lines?: WalletDailyLines | null;
 
+  /**
+   * Owner reserve for this wallet (% of the weekly pool kept back). Null =
+   * the governor's own reserve (the ~4.28%/day accrual it publishes).
+   */
+  @Column('numeric', {
+    nullable: true,
+    default: null,
+    transformer: {
+      to: (value: number | null) => value,
+      from: (value: string | null) => (value === null || value === undefined ? null : Number(value)),
+    },
+  })
+  reserve_pct?: number | null;
+
+  /**
+   * Rollover on/off (D-2026-11-22-11): when off, the wallet's completed-day
+   * surplus is NOT replayed into the next ration day.
+   */
+  @Column('boolean', { default: true })
+  rollover_enabled!: boolean;
+
+  /**
+   * Cross-class pause rule (D-2026-11-22-11): when on, a pause of this
+   * wallet also pauses the wallet class it belongs to (same provider line).
+   */
+  @Column('boolean', { default: false })
+  cross_class_pause!: boolean;
+
   @Column('varchar', { nullable: true, default: null })
   updated_by_user_id!: string | null;
 

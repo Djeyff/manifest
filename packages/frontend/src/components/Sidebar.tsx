@@ -51,13 +51,14 @@ const Sidebar: Component<SidebarProps> = (props) => {
     try {
       return await getWalletConsoleAccess();
     } catch {
-      return { owner: false, demo: false };
+      return { owner: false, available: false };
     }
   });
-  // The nav group appears only when the server CONFIRMED the owner role
-  // (demo !== true). A missing endpoint must not reveal the group.
+  // The nav group appears only when the server CONFIRMED the owner role AND
+  // the live console surface answered. A missing endpoint must not reveal
+  // the group.
   const showWalletConsole = () =>
-    walletConsoleAccess()?.owner === true && walletConsoleAccess()?.demo !== true;
+    walletConsoleAccess()?.owner === true && walletConsoleAccess()?.available === true;
   // A tenant without a subscription has a limit of 0 since the Cloud Free plan
   // ended: there is no allowance to meter, only the upgrade link stays.
   const hasAllowance = () => (billing()?.requests.limit ?? 0) > 0;

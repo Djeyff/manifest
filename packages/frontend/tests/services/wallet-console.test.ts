@@ -9,7 +9,6 @@ vi.mock('../../src/services/api/core', () => ({
 }));
 
 import {
-  DEMO_SETTINGS,
   askCrew,
   getDailyProgress,
   getLoadBalancer,
@@ -40,7 +39,7 @@ const quotaBoard = {
       min_weekly_pct_left: 28.8,
       keys: [
         {
-          label: 'zai-max',
+          label: 'RCR',
           provider: 'zai',
           account: 'MAIN',
           five_h_pct_left: 57.5,
@@ -67,15 +66,21 @@ const dailyBudget = {
   accounts: [
     {
       account: 'MAIN',
-      keys: ['zai-max'],
+      keys: ['RCR'],
       allowed_today_pct: 10.74409,
       used_today_pct: 4.092248,
       remaining_today_pct: 6.651842,
       base_pct: 10,
       rollover_pool_pct: 0.74409,
       floor_pct: 4,
+      reserve_pct: 4.28571,
+      accrued_at_lift_pct: 8.57142,
+      available_pct: 10.74409,
       weekly_headroom_pct: 28.8,
       five_h_headroom_pct: 57.5,
+      spent_week_pct: 41.2,
+      weekly_pool: 1200,
+      denomination: 'credits',
       drain_day: false,
       drain_window: false,
       allow: true,
@@ -85,6 +90,13 @@ const dailyBudget = {
       ration_model: 'RET-670-V3',
       reasons: [],
       halted_by_console: false,
+      anchor: { epoch: 1763700000, source: 'provider', stale: false, note: 'provider reset stamp' },
+      day_epoch: 1763700000,
+      day_start_utc: '00:00',
+      day_elapsed_hours: 3,
+      pace_pct_per_h: 1.364,
+      projected_end_pct: 24.644,
+      working_hours_left: 15,
     },
   ],
   wallets: [
@@ -97,6 +109,24 @@ const dailyBudget = {
       daily_lines: { base_pct: 10, rollover_pool_pct: 0.74409, floor_pct: 4 },
     },
   ],
+  engine: {
+    rollover_enabled: true,
+    rollover_model: 'carry-surplus',
+    rollover_mode: 'strict',
+    rollover_active: 'RCR',
+    rollover_reason: 'completed-day surplus replayed',
+    primary: 'RCR',
+    primary_usable_pct: 28.8,
+    backup: 'CCR set',
+    backup_usable_pct: 12.4,
+    backup_membership_active: true,
+    backup_membership_end: '2026-12-01T00:00:00.000Z',
+    new_ration_day: false,
+    week_start: '2026-11-18T00:00:00.000Z',
+    day_start_utc: '00:00',
+    day_epoch: '2026-11-21T00:00:00.000Z',
+    enforce_tick_at: '2026-11-21T18:40:00.000Z',
+  },
 };
 
 const rawSettings = {
@@ -107,6 +137,10 @@ const rawSettings = {
   parked: false,
   kill_switch_fallback: false,
   daily_lines: { base_pct: 10, rollover_pool_pct: 0.74409, floor_pct: 4 },
+  reserve_pct: 4.28571,
+  rollover_enabled: true,
+  cross_class_pause: false,
+  key_bindings: [{ room: 'RCR', tenant_provider_id: 'tp-1', label: 'RCR', provider: 'zai' }],
   updated_at: '2026-11-21T18:40:00.000Z',
   updated_by_user_id: 'u-1',
 };
@@ -144,7 +178,6 @@ beforeEach(() => {
 describe('wallet console reads (live RET-720 contract)', () => {
   it('reads the quota board, the daily budget, the settings and the audit trail', async () => {
     const data = await getWalletSettings();
-    expect(data.demo).toBe(false);
     expect(mockFetchJson).toHaveBeenCalledWith('/quota-board', undefined, expect.anything());
     expect(mockFetchJson).toHaveBeenCalledWith('/budgets/daily', undefined, expect.anything());
     expect(mockFetchJson).toHaveBeenCalledWith(
@@ -172,24 +205,76 @@ describe('wallet console reads (live RET-720 contract)', () => {
     expect(strip.result.value).toBeCloseTo(10.74409, 6);
   });
 
+  it('names the wallet with its plan (MAIN (Z.AI Max)), not a raw provider label', async () => {
+    const data = await getWalletSettings();
+    expect(data.lines[0].display_name).toBe('MAIN (Z.AI Max)');
+    expect(data.lines[0].provider).toBe('zai');
+  });
+
   it('maps the balancer board onto live cards', async () => {
     const data = await getLoadBalancer();
-    expect(data.demo).toBe(false);
     expect(data.cards[0].name).toBe('MAIN');
+    expect(data.cards[0].display_name).toBe('MAIN (Z.AI Max)');
     expect(data.cards[0].window.pct_left).toBeCloseTo(57.5, 3);
     expect(data.cards[0].weekly.pct_left).toBeCloseTo(28.8, 3);
     expect(data.admission.tone).toBe('ok');
   });
 
+  it('publishes the allowance engine state the balancer page renders', async () => {
+    const data = await getLoadBalancer();
+    expect(data.engine).not.toBeNull();
+    expect(data.engine?.rollover_enabled).toBe(true);
+    expect(data.engine?.primary).toBe('RCR');
+    expect(data.engine?.backup).toBe('CCR set');
+    expect(data.engine?.day_start_utc).toBe('00:00');
+    expect(data.enforce_tick_at).toBe('2026-11-21T18:40:00.000Z');
+  });
+
+  it('publishes one day line per wallet account with the engine arithmetic', async () => {
+    const data = await getLoadBalancer();
+    expect(data.day_lines.length).toBe(1);
+    const line = data.day_lines[0];
+    expect(line.wallet_id).toBe('w-main');
+    expect(line.display_name).toBe('MAIN (Z.AI Max)');
+    expect(line.day_label).toBe('day 1');
+    expect(line.base_pct).toBeCloseTo(10, 6);
+    expect(line.rollover_pct).toBeCloseTo(0.74409, 6);
+    expect(line.reserve_pct).toBeCloseTo(4.28571, 6);
+    expect(line.allowed_pct).toBeCloseTo(10.74409, 6);
+    expect(line.used_pct).toBeCloseTo(4.092248, 6);
+    expect(line.remaining_pct).toBeCloseTo(6.651842, 6);
+    expect(line.pace_pct_per_h).toBeCloseTo(1.364, 3);
+    expect(line.projected_end_pct).toBeCloseTo(24.644, 3);
+    expect(line.five_h.pct_left).toBeCloseTo(57.5, 3);
+    expect(line.weekly.pct_left).toBeCloseTo(28.8, 3);
+  });
+
   it('maps the daily budget onto progress blocks with the used/allowed split', async () => {
     const data = await getDailyProgress();
-    expect(data.demo).toBe(false);
     expect(data.available).toBe(true);
     expect(data.blocks[0].used_pct).toBeCloseTo(4.092248, 6);
     expect(data.blocks[0].allowed_pct).toBeCloseTo(10.74409, 6);
     expect(data.blocks[0].still_allowed_pct).toBeCloseTo(6.651842, 6);
     expect(data.blocks[0].published).toBe(true);
     expect(data.blocks[0].account).toBe('MAIN');
+  });
+
+  it('reports the provider-own burn fields the progress page renders', async () => {
+    const data = await getDailyProgress();
+    const block = data.blocks[0];
+    expect(block.five_h.pct_left).toBeCloseTo(57.5, 3);
+    expect(block.five_h.resets_label).toBeTruthy();
+    expect(block.weekly.pct_left).toBeCloseTo(28.8, 3);
+    expect(block.spent_week_pct).toBeCloseTo(41.2, 3);
+    expect(block.weekly_pool).toBe(1200);
+    expect(block.denomination).toBe('credits');
+    expect(block.pace_pct_per_h).toBeCloseTo(1.364, 3);
+    expect(block.projected_end_pct).toBeCloseTo(24.644, 3);
+    expect(block.working_hours_left).toBe(15);
+    expect(block.reserve_pct).toBeCloseTo(4.28571, 6);
+    expect(block.rollover_pct).toBeCloseTo(0.74409, 6);
+    expect(block.day_start_utc).toBe('00:00');
+    expect(block.anchor_stale).toBe(false);
   });
 
   it('reports the governor’s own day window instead of a wall-clock midnight', async () => {
@@ -208,6 +293,7 @@ describe('wallet console reads (live RET-720 contract)', () => {
           unavailable_reason: 'ration state unreadable at /opt/data/shared/state/ret670-ration.json',
           accounts: [],
           wallets: [{ ...dailyBudget.wallets[0], accounts: [] }],
+          engine: null,
         });
       if (url === '/wallets/w-main/settings') return Promise.resolve({ settings: rawSettings });
       if (url === '/wallets/w-main/settings/audit') return Promise.resolve({ audit: [] });
@@ -223,11 +309,9 @@ describe('wallet console reads (live RET-720 contract)', () => {
     expect(data.blocks[0].published_note).toMatch(/ration state unreadable/);
   });
 
-  it('falls back to the demo payload when the console surface is not deployed (404)', async () => {
+  it('surfaces the transport error verbatim when the console surface is not deployed (404)', async () => {
     mockFetchJson.mockRejectedValue(new Error('API error: 404 Not Found'));
-    const data = await getWalletSettings();
-    expect(data.demo).toBe(true);
-    expect(data.lines.length).toBeGreaterThan(0);
+    await expect(getWalletSettings()).rejects.toThrow(/404/);
   });
 
   it('never falls back to demo data when the server refuses the caller (403)', async () => {
@@ -246,26 +330,25 @@ describe('owner gate', () => {
     mockFetchJson.mockRejectedValue(new Error('Session expired'));
     const access = await getWalletConsoleAccess();
     expect(access.owner).toBe(false);
-    expect(access.demo).toBe(false);
+    expect(access.available).toBe(false);
   });
 
   it('reports owner=false for a caller the server refuses (403)', async () => {
     mockFetchJson.mockRejectedValue(new Error('API error: 403 Forbidden'));
     const access = await getWalletConsoleAccess();
     expect(access.owner).toBe(false);
-    expect(access.demo).toBe(false);
   });
 
-  it('marks the gate as an unverified demo when the console is not deployed (404)', async () => {
+  it('reports the surface as unavailable when the console is not deployed (404)', async () => {
     mockFetchJson.mockRejectedValue(new Error('API error: 404 Not Found'));
     const access = await getWalletConsoleAccess();
-    expect(access.owner).toBe(true);
-    expect(access.demo).toBe(true);
+    expect(access.owner).toBe(false);
+    expect(access.available).toBe(false);
   });
 
   it('reads a live owner=true verdict', async () => {
     const access = await getWalletConsoleAccess();
-    expect(access).toEqual({ owner: true, demo: false });
+    expect(access).toEqual({ owner: true, available: true });
   });
 });
 
@@ -287,7 +370,6 @@ describe('settings round-trip', () => {
         daily_lines: { base_pct: 11, rollover_pool_pct: 0.74409 },
       }),
     });
-    expect(next.demo).toBe(false);
     // The audit row carries the auto-minted ruling id.
     expect(next.audit[0].ruling_id).toBe('D-2026-11-21-01');
     expect(next.audit[0].summary).toContain('base_pct');
@@ -296,31 +378,21 @@ describe('settings round-trip', () => {
     expect(next.governor_tick?.allowed_pct).toBeCloseTo(10.74409, 6);
   });
 
-  it('applies the change locally (with audit row + governor tick) when the API is absent', async () => {
-    mockFetchJson.mockRejectedValue(new Error('API error: 404 Not Found'));
-    mockFetchMutate.mockRejectedValue(new Error('API error: 404 Not Found'));
-    const next = await updateWalletLine({ wallet_id: 'w-main', base_pct: 11 });
-
-    const line = next.lines.find((l) => l.wallet_id === 'w-main');
-    expect(line?.base_pct).toBe(11);
-    // allowed = base + rollover + reserve - floor (server owns the formula)
-    expect(line?.allowed_pct).toBeCloseTo(
-      11 + line!.rollover_pct + line!.reserve_pct - line!.floor_pct,
-      5,
-    );
-    expect(next.audit[0].summary).toContain('line updated');
-    expect(next.governor_tick?.allowed_pct).toBeCloseTo(line!.allowed_pct, 5);
-  });
-
   it('re-throws a real server error instead of silently faking a save', async () => {
     mockFetchMutate.mockRejectedValue(new Error('API error: 500 Internal Server Error'));
     await expect(updateWalletLine({ wallet_id: 'w-main', base_pct: 11 })).rejects.toThrow(/500/);
+  });
+
+  it('surfaces the transport error when the console surface is absent — no local save', async () => {
+    mockFetchJson.mockRejectedValue(new Error('API error: 404 Not Found'));
+    mockFetchMutate.mockRejectedValue(new Error('API error: 404 Not Found'));
+    await expect(updateWalletLine({ wallet_id: 'w-main', base_pct: 11 })).rejects.toThrow(/404/);
   });
 });
 
 describe('ask the crew', () => {
   it('posts the message to the console endpoint', async () => {
-    mockFetchMutate.mockResolvedValue({ ok: true, demo: false, card_ref: 'needs-you #123' });
+    mockFetchMutate.mockResolvedValue({ ok: true, card_ref: 'needs-you #123' });
     const res = await askCrew('hold MM at 7 lanes');
     expect(mockFetchMutate).toHaveBeenCalledWith('/wallets/console/ask-crew', {
       method: 'POST',
@@ -331,17 +403,8 @@ describe('ask the crew', () => {
     expect(res.card_ref).toBe('needs-you #123');
   });
 
-  it('degrades to a local hold when no filing route is published', async () => {
+  it('surfaces the failure when no filing route is published', async () => {
     mockFetchMutate.mockRejectedValue(new Error('API error: 404 Not Found'));
-    const res = await askCrew('hello');
-    expect(res.ok).toBe(true);
-    expect(res.demo).toBe(true);
-  });
-});
-
-describe('demo payload sanity', () => {
-  it('keeps the demo lines usable when the live API is absent', () => {
-    expect(DEMO_SETTINGS.lines.length).toBeGreaterThan(0);
-    expect(DEMO_SETTINGS.lines[0].formula.terms.length).toBeGreaterThan(1);
+    await expect(askCrew('hello')).rejects.toThrow(/404/);
   });
 });

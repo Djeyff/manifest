@@ -14,6 +14,7 @@ import { customProviderColor, formatPerRequestCost } from '../services/formatter
 import FallbackList from '../components/FallbackList.js';
 import ModelParamsAffordance from '../components/ModelParamsAffordance.jsx';
 import RouteKeyChip from '../components/RouteKeyChip.js';
+import { useWalletOptions, walletOptionsForProvider } from '../services/api/wallet-options.js';
 import { setFallbacks as setFallbacksApi } from '../services/api.js';
 import { toast } from '../services/toast-store.js';
 import { modelParamsScopeForTier } from 'manifest-shared';
@@ -711,6 +712,7 @@ interface PrimaryKeyChipProps {
 }
 
 const PrimaryKeyChip: Component<PrimaryKeyChipProps> = (props) => {
+  const allWallets = useWalletOptions();
   const keys = () => {
     const id = props.provId();
     const auth = props.effectiveAuth();
@@ -739,10 +741,15 @@ const PrimaryKeyChip: Component<PrimaryKeyChipProps> = (props) => {
   const usedByFallbacks = () =>
     usedKeyLabelsForModelInTier(props.tier(), props.modelName(), 'primary', keys()[0]?.label);
 
+  // Wallets that can serve this route's provider (owner order
+  // D-2026-11-22-11): the dropdown offers wallets, not providers.
+  const wallets = () => walletOptionsForProvider(allWallets(), props.provId());
+
   return (
-    <Show when={keys().length > 1}>
+    <Show when={wallets().length > 1 || keys().length > 1}>
       <RouteKeyChip
         keys={keys()}
+        wallets={wallets}
         currentLabel={pinned()}
         modelLabel={props.modelLabel}
         usedLabels={usedByFallbacks}

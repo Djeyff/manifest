@@ -31,6 +31,7 @@ import ModelParamsAffordance from './ModelParamsAffordance.jsx';
 import ModelPickerModal from './ModelPickerModal.js';
 import HeaderTierSnippetModal from './HeaderTierSnippetModal.js';
 import RouteKeyChip from './RouteKeyChip.js';
+import { useWalletOptions, walletOptionsForProvider } from '../services/api/wallet-options.js';
 import KeyPickerModal from './KeyPickerModal.js';
 import { toast } from '../services/toast-store.js';
 import { modelParamsScopeForHeaderTier } from 'manifest-shared';
@@ -100,6 +101,7 @@ interface Props {
 }
 
 const HeaderTierCard: Component<Props> = (props) => {
+  const allWallets = useWalletOptions();
   type PickerMode = 'primary' | 'fallback' | null;
   interface PendingKeyPick {
     mode: Exclude<PickerMode, null>;
@@ -174,6 +176,10 @@ const HeaderTierCard: Component<Props> = (props) => {
     if (!id || !auth || auth === 'local') return [];
     return activeRouteKeys(props.connectedProviders, id, auth);
   };
+
+  // Wallets that can serve this route's provider (owner order
+  // D-2026-11-22-11): the dropdown offers wallets, not providers.
+  const primaryWallets = () => walletOptionsForProvider(allWallets(), providerId());
 
   const handlePrimaryKeyPick = async (label: string | null): Promise<void> => {
     const route = props.tier.override_route;
@@ -433,9 +439,10 @@ const HeaderTierCard: Component<Props> = (props) => {
                   <span class="routing-card__main">{modelLabel() || modelName()}</span>
                 </div>
                 <div style="display: flex; align-items: center; gap: 4px; flex-shrink: 0;">
-                  <Show when={primaryKeys().length > 1}>
+                  <Show when={primaryWallets().length > 1 || primaryKeys().length > 1}>
                     <RouteKeyChip
                       keys={primaryKeys()}
+                      wallets={primaryWallets}
                       currentLabel={props.tier.override_route?.keyLabel ?? undefined}
                       modelLabel={modelLabel() || modelName()}
                       usedLabels={() =>

@@ -67,6 +67,18 @@ export class WalletConsoleController {
     return { audit: rows };
   }
 
+  /**
+   * The registered provider keys a wallet can be bound to (D-2026-11-22-13).
+   * The console's key-binding editor reads this list; the bindings themselves
+   * are written through PUT /wallets/:id/settings.
+   */
+  @Get('api/v1/wallets/keys')
+  async listKeys(@TenantCtx() ctx: TenantContext) {
+    this.assertEnabled();
+    if (!ctx.tenantId) throw new NotFoundException('Wallet not found');
+    return { keys: await this.console.listProviderKeys(ctx.tenantId, ctx.userId) };
+  }
+
   @Get('api/v1/quota-board')
   async getQuotaBoard(@TenantCtx() ctx: TenantContext) {
     this.assertEnabled();

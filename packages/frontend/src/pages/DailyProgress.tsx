@@ -65,7 +65,7 @@ export default function DailyProgress() {
   const visibleBlocks = () => {
     const all = progress()?.blocks ?? [];
     const filter = walletFilter();
-    return filter === 'all' ? all : all.filter((b) => b.name === filter);
+    return filter === 'all' ? all : all.filter((b) => b.wallet_id === filter);
   };
 
   return (
@@ -87,9 +87,6 @@ export default function DailyProgress() {
             <div class="wc-breadcrumb">Wallets / today used vs today allowed</div>
           </div>
           <div class="wc-header-controls">
-            <Show when={progress()?.demo}>
-              <span class="wc-demo-note">demo data · live API not deployed yet</span>
-            </Show>
             <div class="wc-wallet-tabs" role="tablist" aria-label="Filter by wallet">
               <button
                 class={`wc-wallet-tab${walletFilter() === 'all' ? ' wc-wallet-tab--active' : ''}`}
@@ -103,13 +100,13 @@ export default function DailyProgress() {
               <For each={progress()?.blocks ?? []}>
                 {(block) => (
                   <button
-                    class={`wc-wallet-tab${walletFilter() === block.name ? ' wc-wallet-tab--active' : ''}`}
+                    class={`wc-wallet-tab${walletFilter() === block.wallet_id ? ' wc-wallet-tab--active' : ''}`}
                     role="tab"
-                    aria-selected={walletFilter() === block.name}
+                    aria-selected={walletFilter() === block.wallet_id}
                     type="button"
-                    onClick={() => setWalletFilter(block.name)}
+                    onClick={() => setWalletFilter(block.wallet_id)}
                   >
-                    {block.name}
+                    {block.display_name}
                   </button>
                 )}
               </For>
@@ -162,7 +159,7 @@ export default function DailyProgress() {
                         <div>
                           <div class="wc-lb-card__name">
                             <WalletChip tone={block.color}>
-                              {block.name} · {block.provider}
+                              {block.display_name}
                             </WalletChip>
                           </div>
                           <div class="wc-note" style="margin-top:4px">
@@ -215,7 +212,7 @@ export default function DailyProgress() {
                           <div
                             class="wc-stack-bar"
                             role="img"
-                            aria-label={`${block.name}: ${used().toFixed(1)} percent used of ${block.allowed_pct.toFixed(1)} percent allowed; projected to land at ${block.projected_pct.toFixed(1)} percent at reset, which is ${paceLabel(block.pace)}.`}
+                            aria-label={`${block.display_name}: ${used().toFixed(1)} percent used of ${block.allowed_pct.toFixed(1)} percent allowed; projected to land at ${block.projected_pct.toFixed(1)} percent at reset, which is ${paceLabel(block.pace)}.`}
                           >
                             <div class="wc-stack-bar__seg wc-stack-bar__seg--used" style={`width:${used()}%`} />
                             <div
@@ -265,6 +262,118 @@ export default function DailyProgress() {
                             used={block.used_pct}
                             projected={block.projected_pct}
                           />
+                        </div>
+
+                        <div class="wc-split-2" style="margin-top:16px">
+                          <section class="wc-panel">
+                            <div class="wc-panel__title">
+                              Provider-own burn{' '}
+                              <span class="sub">the provider's own windows, read by the gateway</span>
+                            </div>
+                            <Kv
+                              k="5h window left"
+                              v={
+                                block.five_h.pct_left === null
+                                  ? 'not published'
+                                  : `${block.five_h.pct_left.toFixed(1)}%`
+                              }
+                            />
+                            <Kv
+                              k="5h resets"
+                              v={block.five_h.resets_label ?? 'not published'}
+                            />
+                            <Kv
+                              k="Weekly left"
+                              v={
+                                block.weekly.pct_left === null
+                                  ? 'not published'
+                                  : `${block.weekly.pct_left.toFixed(1)}%`
+                              }
+                            />
+                            <Kv
+                              k="Weekly resets"
+                              v={block.weekly.resets_label ?? 'not published'}
+                            />
+                            <Kv
+                              k="Spent this week"
+                              v={
+                                block.spent_week_pct === null
+                                  ? 'not published'
+                                  : `${block.spent_week_pct.toFixed(1)}%`
+                              }
+                            />
+                            <Show when={block.weekly_pool !== null && block.denomination}>
+                              <Kv
+                                k="Weekly pool"
+                                v={`${block.weekly_pool?.toFixed(0)} ${block.denomination ?? ''}`.trim()}
+                              />
+                            </Show>
+                          </section>
+
+                          <section class="wc-panel">
+                            <div class="wc-panel__title">
+                              Burn pace vs allowance{' '}
+                              <span class="sub">the governor's own projection</span>
+                            </div>
+                            <Kv
+                              k="Burn pace"
+                              v={
+                                block.pace_pct_per_h === null
+                                  ? 'not published'
+                                  : `${block.pace_pct_per_h.toFixed(2)}% of the weekly pool / h`
+                              }
+                            />
+                            <Kv
+                              k="Projected at reset"
+                              v={
+                                block.projected_end_pct === null
+                                  ? 'not published'
+                                  : `${block.projected_end_pct.toFixed(1)}% of the weekly pool`
+                              }
+                            />
+                            <Kv
+                              k="Working hours left"
+                              v={
+                                block.working_hours_left === null
+                                  ? 'not published'
+                                  : `${block.working_hours_left.toFixed(1)} h`
+                              }
+                            />
+                            <Kv
+                              k="Reserve held"
+                              v={
+                                block.reserve_pct === null
+                                  ? 'not published'
+                                  : `${block.reserve_pct.toFixed(2)}%`
+                              }
+                            />
+                            <Kv
+                              k="Reserve accrued at last lift"
+                              v={
+                                block.accrued_at_lift_pct === null
+                                  ? 'not published'
+                                  : `${block.accrued_at_lift_pct.toFixed(2)}%`
+                              }
+                            />
+                            <Kv
+                              k="Rollover pool"
+                              v={
+                                block.rollover_pct === null
+                                  ? 'not published'
+                                  : `${block.rollover_pct.toFixed(2)}%`
+                              }
+                            />
+                            <Kv k="Day anchor" v={block.day_start_utc ?? 'not published'} />
+                            <Show when={block.anchor_note}>
+                              <Kv k="Anchor note" v={block.anchor_note ?? ''} />
+                            </Show>
+                            <Show when={block.anchor_stale}>
+                              <Callout tone="warn">
+                                The anchor for this line is stale — the governor is reading an older
+                                ration state.
+                              </Callout>
+                            </Show>
+                          </section>
                         </div>
                       </Show>
 
