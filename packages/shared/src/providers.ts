@@ -487,7 +487,7 @@ export const SHARED_PROVIDERS: readonly SharedProviderEntry[] = [
   {
     id: 'zai',
     displayName: 'Z.ai',
-    aliases: ['z.ai'],
+    aliases: ['z.ai', 'z-ai'],
     openRouterPrefixes: ['z-ai', 'zhipuai'],
     requiresApiKey: true,
     localOnly: false,
