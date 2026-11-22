@@ -1,4 +1,6 @@
 import {
+  REASONING_EFFORT_PARAM_PATH,
+  REASONING_EFFORT_VALUES,
   compareProviderParamSpecs,
   deleteProviderParamValue,
   getProviderParamValue,
@@ -245,6 +247,38 @@ const ModelParamsDialog: Component<Props> = (props) => {
     ...(spec.values ?? []).map((v) => ({ label: String(v), value: String(v) })),
   ];
 
+  // Reasoning effort is MPS-knob-gated: the row renders only when the
+  // resolved model's spec list declares the `reasoning_effort` knob. It gets
+  // a dedicated select because (a) "Not set" must stay available even when
+  // the catalog publishes a default — an unset effort lets the client's
+  // value pass through and keeps hop/tier overrides authoritative — and
+  // (b) the options are the canonical shared value ladder, not the
+  // catalog's per-model enum, so the panel can't drift from the values the
+  // proxy is willing to inject (isReasoningEffort).
+  const isReasoningEffortSpec = (spec: ProviderParamSpec): boolean =>
+    spec.path === REASONING_EFFORT_PARAM_PATH && spec.type === 'enum';
+
+  const EffortRow = (spec: ProviderParamSpec) => (
+    <div class="model-params__field">
+      <Select
+        label={spec.label}
+        options={[
+          { label: 'Not set', value: UNSET_OPTION_VALUE },
+          ...REASONING_EFFORT_VALUES.map((v) => ({ label: v, value: v })),
+        ]}
+        value={isSet(spec) ? selectValue(spec) : UNSET_OPTION_VALUE}
+        disabled={isDisabled(spec)}
+        onChange={(v) => {
+          if (v === UNSET_OPTION_VALUE) {
+            unsetValue(spec);
+            return;
+          }
+          setValue(spec, v);
+        }}
+      />
+    </div>
+  );
+
   const numericValue = (spec: ProviderParamSpec): number => {
     const value = valueFor(spec);
     return typeof value === 'number' && Number.isFinite(value) ? value : numberDefault(spec);
@@ -440,6 +474,7 @@ const ModelParamsDialog: Component<Props> = (props) => {
       if (values.length === 2 && values.includes('enabled') && values.includes('disabled')) {
         return ToggleRow(spec);
       }
+      if (isReasoningEffortSpec(spec)) return EffortRow(spec);
       return SelectRow(spec);
     }
     if ((spec.type === 'integer' || spec.type === 'number') && spec.range?.max !== undefined) {
