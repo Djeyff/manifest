@@ -1697,9 +1697,10 @@ describe('MessageLog', () => {
       await vi.waitFor(() => {
         const selects = container.querySelectorAll('[data-testid="select"]');
         // In agent mode, no harness select renders; the first Select is the
-        // recovery filter (connections stay a multiselect, rendered apart).
+        // wallet scope filter since the wallets console (#5) landed — the
+        // recovery filter stays a multiselect, rendered apart.
         expect(selects[0].textContent).not.toContain('All harnesses');
-        expect(selects[0].textContent).toContain('All attempts');
+        expect(selects[0].textContent).toContain('All wallets');
       });
     });
 

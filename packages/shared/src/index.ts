@@ -83,6 +83,16 @@ export {
   routeToLegacy,
 } from './model-route';
 export type { ModelRoute, LegacyOverrideTriple } from './model-route';
+export {
+  REASONING_EFFORT_PARAM_PATH,
+  REASONING_EFFORT_VALUES,
+  applyRequestParamsWithEffort,
+  isReasoningEffort,
+  resolveEffectiveReasoningEffort,
+  resolveReasoningEffort,
+  supportsReasoningEffort,
+} from './reasoning-effort';
+export type { ReasoningEffort, ReasoningEffortSources } from './reasoning-effort';
 export { applyRequestParamDefaults } from './request-params';
 export type { JsonValue, RequestParamDefaults } from './request-params';
 export { snapshotRequestParams } from './request-params-snapshot';

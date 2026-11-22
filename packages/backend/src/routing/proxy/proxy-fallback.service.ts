@@ -2,7 +2,7 @@ import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import type { AuthType, ModelRoute } from 'manifest-shared';
-import { applyRequestParamDefaults } from 'manifest-shared';
+import { applyRequestParamsWithEffort } from 'manifest-shared';
 import { AgentModelParamsService } from '../routing-core/agent-model-params.service';
 import { ProviderParamSpecService } from '../routing-core/provider-param-spec.service';
 import { AutofixService, type AutofixAttempt } from '../autofix/autofix.service';
@@ -21,6 +21,12 @@ import { getAutofixRetry, type AutofixRecord } from '../autofix/autofix.types';
 export interface ParamMergeContext {
   agentId: string;
   scopeKey: string;
+  /**
+   * Reasoning effort carried by the resolved tier's `override_route`
+   * (`reasoning_effort` key inside the tier JSONB). Applied per attempt
+   * under the precedence hop > tier > panel > client.
+   */
+  tierReasoningEffort?: string | null;
 }
 
 interface ForwardProviderOptions {
@@ -51,6 +57,12 @@ interface ForwardProviderOptions {
   /** The caller's raw `anthropic-beta` header, merged in when the endpoint is Anthropic. */
   clientAnthropicBeta?: string | string[];
   paramMergeContext?: ParamMergeContext;
+  /**
+   * Effort carried by the route object used for THIS attempt
+   * (`ModelRoute.reasoning_effort`). Wins over the tier-level override,
+   * the Model-parameters panel value and the client's request value.
+   */
+  hopReasoningEffort?: string | null;
   tenantProviderId?: string | null;
   startProviderAttempt?: StartProviderAttempt;
   /**
@@ -210,6 +222,7 @@ export class ProxyFallbackService {
     provider: string,
     authType: AuthType | string | undefined,
     model: string,
+    hopReasoningEffort?: string | null,
   ): Promise<Record<string, unknown>> {
     if (!ctx || !authType) return body;
     const modelParams = await this.modelParamsService.get(
@@ -220,7 +233,14 @@ export class ProxyFallbackService {
       model,
     );
     const specs = await this.providerParamSpecs.getSpecs(provider, authType as AuthType, model);
-    return applyRequestParamDefaults(body, modelParams, specs);
+    // Per-attempt reasoning-effort precedence: this attempt's route (hop)
+    // beats the tier-level override, which beats the panel value, which beats
+    // what the client sent. Injection is gated on the MPS catalog declaring
+    // the knob for this exact (provider, auth, model).
+    return applyRequestParamsWithEffort(body, modelParams, specs, {
+      hop: hopReasoningEffort ?? null,
+      tier: ctx.tierReasoningEffort ?? null,
+    });
   }
 
   async tryFallbacks(
@@ -391,6 +411,7 @@ export class ProxyFallbackService {
           thinkingLookup,
           clientAnthropicBeta,
           paramMergeContext,
+          hopReasoningEffort: route?.reasoning_effort ?? null,
           tenantProviderId,
           startProviderAttempt,
         }),
@@ -1158,6 +1179,7 @@ export class ProxyFallbackService {
       provider,
       authType,
       opts.model,
+      opts.hopReasoningEffort,
     );
     // Agent-scope fallback for providers (OpenCode) that need a session id on
     // every request even when the caller sent no x-session-key. NUL-joined so
@@ -1214,6 +1236,7 @@ export class ProxyFallbackService {
               provider,
               authType,
               opts.model,
+              opts.hopReasoningEffort,
             );
             resolved = await this.reasoningCache.prepareRequest(
               resolved,

@@ -10,7 +10,7 @@ import {
   canonicalizeRequest,
   envFlagEnabled,
   isCacheableRequest,
-} from './exact-response-cache.ts';
+} from './exact-response-cache';
 
 test('flag parsing is fail-closed', () => {
   assert.equal(envFlagEnabled(undefined), false);
@@ -21,7 +21,10 @@ test('flag parsing is fail-closed', () => {
 });
 
 test('canonicalization is key-order independent and value sensitive', () => {
-  assert.equal(canonicalizeRequest({ a: 1, b: { d: 2, c: 3 } }), canonicalizeRequest({ b: { c: 3, d: 2 }, a: 1 }));
+  assert.equal(
+    canonicalizeRequest({ a: 1, b: { d: 2, c: 3 } }),
+    canonicalizeRequest({ b: { c: 3, d: 2 }, a: 1 }),
+  );
   assert.notEqual(canonicalizeRequest({ a: 1 }), canonicalizeRequest({ a: '1' }));
   assert.notEqual(canonicalizeRequest({ m: [1, 2] }), canonicalizeRequest({ m: [2, 1] }));
 });
@@ -33,7 +36,10 @@ test('keys differ across model/agent/tenant/body', () => {
   assert.notEqual(buildExactCacheKey({ ...base, model: 'm2' }), key);
   assert.notEqual(buildExactCacheKey({ ...base, model: 'm1', agentId: 'b' }), key);
   assert.notEqual(buildExactCacheKey({ ...base, model: 'm1', tenantId: 'z' }), key);
-  assert.notEqual(buildExactCacheKey({ model: 'm1', body: { x: 2 }, agentId: 'a', tenantId: 't' }), key);
+  assert.notEqual(
+    buildExactCacheKey({ model: 'm1', body: { x: 2 }, agentId: 'a', tenantId: 't' }),
+    key,
+  );
 });
 
 test('cacheability rules', () => {
@@ -52,7 +58,9 @@ test('TTL + bounded eviction', () => {
   now = 1200;
   assert.equal(cache.get('k'), undefined);
   const c2 = new ExactResponseCache({ maxEntries: 2, ttlMs: 10000 });
-  c2.set('a', 1); c2.set('b', 2); c2.set('c', 3);
+  c2.set('a', 1);
+  c2.set('b', 2);
+  c2.set('c', 3);
   assert.equal(c2.size, 2);
   assert.equal(c2.get('a'), undefined);
   assert.ok(c2.get('c'));

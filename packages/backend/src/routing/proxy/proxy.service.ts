@@ -27,6 +27,7 @@ import {
   DEFAULT_RESPONSE_MODE,
   SPECIFICITY_CATEGORIES,
   modelParamsScopeForRouting,
+  resolveEffectiveReasoningEffort,
   routeEquals,
   snapshotRequestParams,
 } from 'manifest-shared';
@@ -340,7 +341,8 @@ export class ProxyService {
     // gate inside resolveRouteCredentials.
     const walletCaller: WalletGateCallerContext = {
       agentName,
-      tierName: (await this.walletBudget?.tierNameFor(resolved.header_tier_id ?? null)) ?? undefined,
+      tierName:
+        (await this.walletBudget?.tierNameFor(resolved.header_tier_id ?? null)) ?? undefined,
       triggerHeader: triggerHeaderValue(headers),
     };
     const tierPolicyVars = await this.walletBudget?.tierPolicyBlock(
@@ -389,7 +391,11 @@ export class ProxyService {
     });
     const paramMergeContext: ParamMergeContext | undefined = explicitModelOverride
       ? undefined
-      : { agentId, scopeKey };
+      : {
+          agentId,
+          scopeKey,
+          tierReasoningEffort: resolved.tier_reasoning_effort ?? null,
+        };
 
     // Snapshot of which known param keys are *effectively in play* for the
     // primary attempt. Stored on every `agent_messages` row recorded for
@@ -418,6 +424,10 @@ export class ProxyService {
           body,
           modelParams: primaryModelParams,
           specs: primarySpecs,
+          reasoningEffort: resolveEffectiveReasoningEffort(body, primaryModelParams, primarySpecs, {
+            hop: route.reasoning_effort ?? null,
+            tier: resolved.tier_reasoning_effort ?? null,
+          }),
         });
 
     const dashboardUrl = getDashboardUrl(this.config, agentName, 'routing');
@@ -517,6 +527,7 @@ export class ProxyService {
       thinkingLookup,
       clientAnthropicBeta: headers?.['anthropic-beta'],
       paramMergeContext,
+      hopReasoningEffort: route.reasoning_effort ?? null,
       tenantProviderId: credentials.tenantProviderId,
       startProviderAttempt,
       // RET-647 scope 2b: the remaining chain hops — their presence suppresses
@@ -913,7 +924,14 @@ export class ProxyService {
       signatureLookup: ctx.signatureLookup,
       thinkingLookup: ctx.thinkingLookup,
       clientAnthropicBeta: ctx.headers?.['anthropic-beta'],
-      paramMergeContext: explicitModelOverride ? undefined : { agentId: ctx.agentId, scopeKey },
+      paramMergeContext: explicitModelOverride
+        ? undefined
+        : {
+            agentId: ctx.agentId,
+            scopeKey,
+            tierReasoningEffort: resolved.tier_reasoning_effort ?? null,
+          },
+      hopReasoningEffort: route.reasoning_effort ?? null,
       tenantProviderId: credentials.tenantProviderId,
       startProviderAttempt: ctx.startProviderAttempt,
       chainFallbacks: this.effectiveFallbackRoutes(resolved),
@@ -1433,6 +1451,15 @@ export class ProxyService {
         body: body as Record<string, unknown>,
         modelParams: fallbackModelParams,
         specs: fallbackSpecs,
+        reasoningEffort: resolveEffectiveReasoningEffort(
+          body as Record<string, unknown>,
+          fallbackModelParams,
+          fallbackSpecs,
+          {
+            hop: fallbackRoutes[success.fallbackIndex]?.reasoning_effort ?? null,
+            tier: resolved.tier_reasoning_effort ?? null,
+          },
+        ),
       });
       return {
         forward: success.forward,
@@ -1498,6 +1525,15 @@ export class ProxyService {
       body: body as Record<string, unknown>,
       modelParams: primaryModelParams,
       specs: exhaustedSpecs,
+      reasoningEffort: resolveEffectiveReasoningEffort(
+        body as Record<string, unknown>,
+        primaryModelParams,
+        exhaustedSpecs,
+        {
+          hop: resolved.route?.reasoning_effort ?? null,
+          tier: resolved.tier_reasoning_effort ?? null,
+        },
+      ),
     });
     return {
       forward: {

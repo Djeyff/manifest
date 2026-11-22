@@ -190,6 +190,7 @@ export class ResolveService {
         confidence: result.confidence,
         score: result.score,
         reason: result.reason,
+        tier_reasoning_effort: readOverrideRoute(assignment)?.reasoning_effort ?? null,
         override_model_unavailable: routeChain.unavailableOverrideModel ?? undefined,
       };
     }
@@ -203,6 +204,7 @@ export class ResolveService {
       confidence: result.confidence,
       score: result.score,
       reason: result.reason,
+      tier_reasoning_effort: readOverrideRoute(assignment)?.reasoning_effort ?? null,
     };
   }
 
@@ -225,6 +227,7 @@ export class ResolveService {
         confidence: 1,
         score: 0,
         reason,
+        tier_reasoning_effort: null,
       };
     }
 
@@ -251,6 +254,7 @@ export class ResolveService {
       confidence: 1,
       score: 0,
       reason,
+      tier_reasoning_effort: readOverrideRoute(assignment)?.reasoning_effort ?? null,
       // Heartbeats are keep-alives, not routed chat. Keep their existing
       // neutral M101 so an unavailable simple-tier override can't repaint
       // every periodic heartbeat as a model-not-available response.
@@ -348,6 +352,7 @@ export class ResolveService {
       confidence: 1,
       score: 0,
       reason: 'header-match',
+      tier_reasoning_effort: overrideRoute.reasoning_effort ?? null,
       header_tier_id: match.id,
       header_tier_name: match.name,
       header_tier_color: match.badge_color,
@@ -430,6 +435,7 @@ export class ResolveService {
       confidence: detected.confidence,
       score: 0,
       reason: 'specificity',
+      tier_reasoning_effort: overrideRoute.reasoning_effort ?? null,
       specificity_category: detected.category,
     };
   }

@@ -969,6 +969,7 @@ describe('ProxyService — orchestration', () => {
       expect(reforwardOpts.paramMergeContext).toEqual({
         agentId: 'agent-1',
         scopeKey: 'tier:standard',
+        tierReasoningEffort: null,
       });
     });
   });
@@ -2394,7 +2395,11 @@ describe('ProxyService — orchestration', () => {
       // Body stays raw — the merge happens per-attempt inside the fallback
       // service so each fallback iteration looks up its own scoped route.
       expect(call.body).toEqual({ messages: [{ role: 'user', content: 'hi' }] });
-      expect(call.paramMergeContext).toEqual({ agentId: 'agent-1', scopeKey: 'tier:standard' });
+      expect(call.paramMergeContext).toEqual({
+        agentId: 'agent-1',
+        scopeKey: 'tier:standard',
+        tierReasoningEffort: null,
+      });
     });
 
     it('looks up the primary route model params for the snapshot', async () => {

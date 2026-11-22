@@ -136,6 +136,36 @@ const booleanSpecs: readonly ProviderParamSpec[] = [
   },
 ];
 
+// Mirrors the real z-ai / glm-5.3 MPS entry: reasoning_effort is knob-declared
+// with a catalog default, so only the dedicated effort row can offer "Not set".
+const glmEffortSpecs: readonly ProviderParamSpec[] = [
+  {
+    provider: 'z-ai',
+    authType: 'api_key',
+    model: 'glm-5.3',
+    path: 'thinking.type',
+    type: 'enum',
+    label: 'Thinking mode',
+    description: 'Controls whether GLM-5.3 thinking mode is enabled.',
+    default: 'enabled',
+    values: ['enabled', 'disabled'],
+    group: 'reasoning',
+  },
+  {
+    provider: 'z-ai',
+    authType: 'api_key',
+    model: 'glm-5.3',
+    path: 'reasoning_effort',
+    type: 'enum',
+    label: 'Reasoning effort',
+    description: 'Controls how much reasoning effort GLM-5.3 spends when thinking is enabled.',
+    default: 'max',
+    values: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    group: 'reasoning',
+    applicability: { only: { 'thinking.type': 'enabled' } },
+  },
+];
+
 describe('ModelParamsDialog', () => {
   const baseProps = {
     open: true,
@@ -260,6 +290,66 @@ describe('ModelParamsDialog', () => {
     expect(screen.getByLabelText('Thinking mode')).toBeTruthy();
     expect(screen.getByRole('slider', { name: 'Temperature' })).toBeTruthy();
     expect(screen.getByLabelText('Max tokens')).toBeTruthy();
+  });
+
+  it('renders the Reasoning effort row with Not set plus the canonical ladder for effort-capable specs', () => {
+    render(() => <ModelParamsDialog {...baseProps} specs={glmEffortSpecs} slotLabel="glm-5.3" />);
+
+    // Not set wins on open even though the catalog publishes a default —
+    // an unset effort lets the client's value pass through.
+    const trigger = screen.getByLabelText('Reasoning effort') as HTMLButtonElement;
+    expect(trigger.textContent).toContain('Not set');
+    expect(screen.getByText('reasoning_effort')).toBeTruthy();
+
+    fireEvent.click(trigger);
+    const names = Array.from(document.querySelectorAll('[role="option"]')).map(
+      (el) => el.textContent,
+    );
+    expect(names).toEqual(['Not set', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+  });
+
+  it('hides the Reasoning effort row when the specs do not declare the reasoning_effort knob', () => {
+    render(() => <ModelParamsDialog {...baseProps} />);
+    expect(screen.queryByLabelText('Reasoning effort')).toBeNull();
+  });
+
+  it('saves a reasoning effort override through the params payload', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(() => (
+      <ModelParamsDialog
+        {...baseProps}
+        specs={glmEffortSpecs}
+        slotLabel="glm-5.3"
+        onSave={onSave}
+      />
+    ));
+
+    fireEvent.click(screen.getByLabelText('Reasoning effort'));
+    fireEvent.click(screen.getByRole('option', { name: 'high' }));
+    fireEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith({ reasoning_effort: 'high' }));
+  });
+
+  it('returns to Not set and saves null when a saved effort override is cleared', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(() => (
+      <ModelParamsDialog
+        {...baseProps}
+        specs={glmEffortSpecs}
+        slotLabel="glm-5.3"
+        current={{ reasoning_effort: 'high' }}
+        onSave={onSave}
+      />
+    ));
+
+    const trigger = screen.getByLabelText('Reasoning effort') as HTMLButtonElement;
+    expect(trigger.textContent).toContain('high');
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('option', { name: 'Not set' }));
+    fireEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith(null));
   });
 
   it('lets adaptive-only enum params return to unset', async () => {
