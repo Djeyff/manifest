@@ -33,6 +33,16 @@ export interface PublicQuotaWallet {
   five_h_pct_left: number | null;
   five_h_reset_at: string | null;
   weekly_spent_pct: number | null;
+  /** The wallet's OWN ration day number (1-based, the governor's own clock). */
+  day_number?: number | null;
+  /** The wallet's own ration day index (0-based within the ration week). */
+  day_index?: number | null;
+  /** UTC clock the ration day starts at (the daily reset clock). */
+  day_start_utc?: string | null;
+  /** The wallet's own provider-own week reset anchor (its own week clock). */
+  week_reset_at?: string | null;
+  /** The governor's ration model label, verbatim. */
+  ration_model?: string | null;
   pace: PublicQuotaPace;
   pace_pct_per_h: number | null;
   projected_end_pct: number | null;

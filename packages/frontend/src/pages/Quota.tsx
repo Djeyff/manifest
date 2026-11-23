@@ -40,7 +40,7 @@ function pct(value: number | null): string {
   return value === null ? '--' : `${value.toFixed(1)}%`;
 }
 
-function fmtUtc(iso: string | null): string {
+function fmtUtc(iso: string | null | undefined): string {
   if (!iso) return '--';
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? '--' : d.toUTCString();
@@ -79,6 +79,18 @@ export default function Quota() {
     return `${f.base_pct.toFixed(1)}% base + ${f.reserve_pct.toFixed(1)}% reserve + ${f.rollover_pool_pct.toFixed(
       1,
     )}% rollover = ${pct(f.allowed_today_pct)} allowed today`;
+  };
+
+  /**
+   * The wallet's OWN ration day — every wallet runs its own day clock, so the
+   * owner sees which day each wallet is on (day N of 7) and when that day
+   * resets. The numbers come from the governor's published decision, never
+   * from the browser.
+   */
+  const dayText = (w: PublicQuotaWallet): string => {
+    if (w.day_number == null) return 'not published';
+    const start = w.day_start_utc ? ` · day starts ${w.day_start_utc}Z` : '';
+    return `day ${w.day_number}/7${start}`;
   };
 
   return (
@@ -231,6 +243,8 @@ export default function Quota() {
                         <Kv k="5h left" v={pct(wallet.five_h_pct_left)} />
                         <Kv k="5h resets" v={fmtUtc(wallet.five_h_reset_at)} />
                         <Kv k="Week resets" v={fmtUtc(wallet.weekly_reset_at)} />
+                        <Kv k="Own day" v={dayText(wallet)} />
+                        <Kv k="Own week reset" v={fmtUtc(wallet.week_reset_at)} />
                         <Kv k="Read at" v={fmtUtc(wallet.polled_at)} />
                       </section>
                     </div>

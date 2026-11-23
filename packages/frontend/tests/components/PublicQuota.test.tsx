@@ -25,6 +25,11 @@ const FEED: PublicQuotaFeed = {
       five_h_pct_left: 60,
       five_h_reset_at: null,
       weekly_spent_pct: 28.4,
+      day_number: 2,
+      day_index: 1,
+      day_start_utc: '10:05',
+      week_reset_at: '2026-11-27T23:13:10.000Z',
+      ration_model: 'owner-v3',
       pace: 'ON_PACE',
       pace_pct_per_h: 0.8,
       projected_end_pct: 28.8,
@@ -223,6 +228,29 @@ describe('Quota (ret500-nodupe public page)', () => {
     expect(mmRow?.textContent).toContain('used today');
     expect(mmRow?.textContent).toContain('allowed today');
     expect(mmRow?.textContent).toContain('week left');
+  });
+
+  it('shows each wallet on its OWN day clock (day number + own week reset)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => FEED,
+    })));
+
+    render(() => (
+      <MetaProvider>
+        <Quota />
+      </MetaProvider>
+    ));
+
+    await waitFor(() => expect(screen.getByText('MAIN')).toBeTruthy());
+
+    // The wallet's own ration day + the daily reset clock.
+    const mainRow = document.querySelector('section[data-wallet="MAIN"]');
+    expect(mainRow?.textContent).toContain('Own day');
+    expect(mainRow?.textContent).toContain('day 2/7');
+    expect(mainRow?.textContent).toContain('day starts 10:05Z');
+    // Its own provider-own week reset anchor.
+    expect(mainRow?.textContent).toContain('Own week reset');
   });
 
   it('keeps serving the page shell when the feed fetch fails — never blanks, offers retry', async () => {
