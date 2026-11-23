@@ -96,6 +96,10 @@ export interface RationState {
   /** Reason the published state is missing/unreadable (null when available). */
   unavailable_reason: string | null;
   updated_at: string | null;
+  /** The governor's own publication stamp (`generated_at`), when published. */
+  generated_at: string | null;
+  /** The freshest governor stamp we can trust: enforce_tick → updated_at → generated_at → last_status.at. */
+  tick_at: string | null;
   accounts: Record<string, RationAccountStatus>;
   /** label (acct_key) -> account name. */
   account_by_key: Record<string, string>;
@@ -130,6 +134,8 @@ export function readRationState(path: string = rationStatePath()): RationState {
       available: false,
       unavailable_reason: `ration state unreadable at ${path}: ${reason}`,
       updated_at: null,
+      generated_at: null,
+      tick_at: null,
       accounts: {},
       account_by_key: {},
       week_start: null,
@@ -154,7 +160,12 @@ export function readRationState(path: string = rationStatePath()): RationState {
   const updated_at =
     typeof updatedRaw === 'number' && Number.isFinite(updatedRaw)
       ? new Date(updatedRaw * 1000).toISOString()
-      : null;
+      : typeof updatedRaw === 'string' && updatedRaw.trim() !== ''
+        ? updatedRaw
+        : null;
+  const generatedRaw = parsed['generated_at'];
+  const generated_at =
+    typeof generatedRaw === 'string' && generatedRaw.trim() !== '' ? generatedRaw : null;
   const rolloverRaw = parsed['rollover'];
   const rollover: RationRollover | null =
     rolloverRaw && typeof rolloverRaw === 'object' ? (rolloverRaw as RationRollover) : null;
@@ -171,10 +182,22 @@ export function readRationState(path: string = rationStatePath()): RationState {
               : null,
         }
       : null;
+  // The governor publishes its tick under different keys depending on the
+  // writer: `enforce_tick.at` (tick writer), `updated_at` (older writers),
+  // `generated_at` (the ret670 enforce-tick writer) or `last_status.at` (the
+  // status payload itself). Read them in that order so the tick stamp is
+  // never null while a governor file exists.
+  const lastStatusAt =
+    typeof lastStatus['at'] === 'string' && lastStatus['at'].trim() !== ''
+      ? (lastStatus['at'] as string)
+      : null;
+  const tick_at = enforce_tick?.at ?? updated_at ?? generated_at ?? lastStatusAt;
   return {
     available: true,
     unavailable_reason: null,
     updated_at,
+    generated_at,
+    tick_at,
     accounts,
     account_by_key,
     week_start: asNumber(lastStatus['week_start']),

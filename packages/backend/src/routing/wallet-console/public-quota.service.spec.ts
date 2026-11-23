@@ -101,6 +101,8 @@ function snapshot(
       plan_level: 'max',
       subscription_status: 'active',
       seen_at: o.seen_at ?? polledAt,
+      polled_at: o.seen_at ?? polledAt,
+      source: label.includes('MM') ? 'minimax-token-plan' : 'zai-coding-plan',
       error: null,
     } as ZaiQuotaSnapshot['labels'][string];
   }
