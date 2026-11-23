@@ -5,6 +5,7 @@ import { readFileSync, renameSync, writeFileSync } from 'fs';
 import { ZaiQuotaService } from '../zai-quota/zai-quota.service';
 import { ZaiQuotaSnapshot } from '../zai-quota/zai-quota-monitor';
 import { readRationState, RationState } from './ration-state';
+import { readCompactionHealth, CompactionHealth } from './compaction-health';
 import { Wallet, WalletMember } from '../../entities/wallet.entity';
 import { WalletSettings } from '../../entities/wallet-settings.entity';
 import { TenantProvider } from '../../entities/tenant-provider.entity';
@@ -124,6 +125,8 @@ export interface PublicQuotaFeed {
   /** Governor state availability, verbatim. */
   ration_available: boolean;
   ration_unavailable_reason: string | null;
+  /** OPTIONAL: the standing compaction-quality-gate state (RET-500). */
+  compaction_health?: CompactionHealth;
 }
 
 /** A canonical wallet the pinned tenant owns, with its live row inputs. */
@@ -271,6 +274,10 @@ export class PublicQuotaService {
       polled_at: snapshot.polled_at,
       ration_available: ration.available,
       ration_unavailable_reason: ration.unavailable_reason,
+      // OPTIONAL: the RET-500 compaction quality gate publishes its standing
+      // verdict as a state file. Missing file => `available:false` here; the
+      // quota feed still serves 200 with the wallet rows untouched.
+      compaction_health: readCompactionHealth(),
     };
   }
 
