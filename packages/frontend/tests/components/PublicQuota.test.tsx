@@ -178,6 +178,53 @@ describe('Quota (ret500-nodupe public page)', () => {
     }
   });
 
+  it('shows a HALTED badge for a governor-halted wallet (MM) with numbers still visible', async () => {
+    const haltedFeed: PublicQuotaFeed = {
+      ...FEED,
+      wallets: {
+        ...FEED.wallets,
+        MM: {
+          ...FEED.wallets.MM,
+          // MM has no wallet_settings row -> parked is false; the governor
+          // halts it (allow=false / halt=true) -> halted is true.
+          parked: false,
+          halted: true,
+          used_today_pct: 17.8,
+          allowed_today_pct: 10,
+          weekly_pct_left: 87,
+          five_h_pct_left: 99,
+          stale: false,
+          published: true,
+          note: null,
+        },
+      },
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => haltedFeed,
+    })));
+
+    render(() => (
+      <MetaProvider>
+        <Quota />
+      </MetaProvider>
+    ));
+
+    await waitFor(() => expect(screen.getByText('MM')).toBeTruthy());
+
+    // Halted badge, not the PARKED one.
+    expect(screen.getByText('HALTED')).toBeTruthy();
+    expect(screen.queryByText('PARKED')).toBeNull();
+
+    // Numbers stay visible while the line is dry.
+    expect(screen.getByText('17.8%')).toBeTruthy();
+    expect(screen.getByText('87.0%')).toBeTruthy();
+    const mmRow = document.querySelector('section[data-wallet="MM"]');
+    expect(mmRow?.textContent).toContain('used today');
+    expect(mmRow?.textContent).toContain('allowed today');
+    expect(mmRow?.textContent).toContain('week left');
+  });
+
   it('keeps serving the page shell when the feed fetch fails — never blanks, offers retry', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => {
       throw new Error('network down');

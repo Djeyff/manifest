@@ -153,6 +153,9 @@ export default function Quota() {
                         <Show when={wallet.parked}>
                           <Pill tone="drain">PARKED</Pill>
                         </Show>
+                        <Show when={wallet.halted && !wallet.parked}>
+                          <Pill tone="danger">HALTED</Pill>
+                        </Show>
                         <Show when={wallet.stale}>
                           <Pill tone="warn">STALE</Pill>
                         </Show>

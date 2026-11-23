@@ -133,6 +133,26 @@ interface LastKnownFile {
   wallets: Partial<Record<PublicWalletName, { row: PublicQuotaWallet; at: string }>>;
 }
 
+/**
+ * Canonical wallet key for a DB wallet name.
+ *
+ * The owner's wallet rows are named for display ("MAIN (Z.AI Max)",
+ * "MM (MiniMax)", "BACKUP (Z.AI Pro)"), while the canonical keys this
+ * surface serves are MAIN / MM / BACKUP. Strip a trailing parenthetical
+ * qualifier before comparing, so the display name in the DB never blanks the
+ * row. Display names themselves stay untouched (see `displayNameOf`).
+ */
+export function canonicalWalletName(raw: string | null | undefined): PublicWalletName | null {
+  const base = (raw ?? '')
+    .trim()
+    .replace(/\s*\([^)]*\)\s*$/, '')
+    .trim()
+    .toUpperCase();
+  return (PUBLIC_WALLET_NAMES as readonly string[]).includes(base)
+    ? (base as PublicWalletName)
+    : null;
+}
+
 /** Display form: `MAIN (Z.AI Max)` / `MM (MiniMax)` / `BACKUP (Z.AI Pro)`. */
 const PLAN_BY_NAME: Record<string, string> = {
   MAIN: 'Z.AI Max',
@@ -231,7 +251,11 @@ export class PublicQuotaService {
 
     return {
       wallets,
-      tick_at: ration.enforce_tick?.at ?? ration.updated_at ?? null,
+      // The governor publishes its tick under several key names; `ration.tick_at`
+      // already walks the fallback chain (enforce_tick → updated_at →
+      // generated_at → last_status.at) so the feed is never null while a
+      // governor file exists.
+      tick_at: ration.tick_at,
       generated_at: new Date().toISOString(),
       stale: staleFeed || Object.values(wallets).every((w) => w.stale),
       polled_at: snapshot.polled_at,
@@ -251,7 +275,7 @@ export class PublicQuotaService {
   private async listPublicWallets(ration: RationState): Promise<PublicWalletEntry[]> {
     const canonical = new Set<string>(PUBLIC_WALLET_NAMES);
     const wallets = await this.walletRepo.find();
-    const candidates = wallets.filter((w) => canonical.has((w.name ?? '').trim().toUpperCase()));
+    const candidates = wallets.filter((w) => canonical.has(canonicalWalletName(w.name) ?? ''));
     if (candidates.length === 0) return [];
 
     const byTenant = new Map<string, typeof candidates>();
@@ -274,7 +298,8 @@ export class PublicQuotaService {
 
     const out: PublicWalletEntry[] = [];
     for (const wallet of pinned[1]) {
-      const name = (wallet.name ?? '').trim().toUpperCase() as PublicWalletName;
+      const name = canonicalWalletName(wallet.name);
+      if (!name) continue;
       const row = await this.settingsRepo.findOne({ where: { wallet_id: wallet.id } });
       const memberKeys = members
         .filter((m) => m.wallet_id === wallet.id)
@@ -373,19 +398,21 @@ export class PublicQuotaService {
     let floor: number | null = null;
     let haltedByGovernor = false;
     let accountNumbersKnown = false;
+    /** The governor's own published usable line, when it publishes one. */
+    let governorUsable: number | null = null;
     for (const account of entry.accountNames) {
       const status = ration.accounts[account];
       if (!status) continue;
       const decision = status.decision ?? {};
       accountNumbersKnown = true;
       usedToday = pickSum(usedToday, decNum(decision.spent_today_pct ?? status.spent_today_pct));
-      allowedToday = pickSum(allowedToday, decNum(decision.usable_pct ?? decision.available_pct));
+      governorUsable = pickSum(governorUsable, decNum(decision.usable_pct ?? decision.available_pct));
       weeklySpent = pickMax(weeklySpent, decNum(status.spent_week_pct));
       base = pickSum(base, decNum(decision.base_pct));
       reserve = pickSum(reserve, decNum(decision.reserve_pct));
       rollover = pickSum(rollover, decNum(decision.rollover_pool_pct));
       floor = pickSum(floor, decNum(decision.floor_pct));
-      if (decision.halt === true) haltedByGovernor = true;
+      if (decision.halt === true || decision.allow === false) haltedByGovernor = true;
     }
     if (!accountNumbersKnown) {
       if (ration.available) notes.push('no ration account published for this wallet');
@@ -401,11 +428,27 @@ export class PublicQuotaService {
       }
     }
     // The owner's arithmetic IS the display contract: allowed-today =
-    // base + reserve + rollover. When the governor publishes all three terms
-    // we derive the line from them so the bar's maths can never disagree with
-    // the strip beneath it; usable_pct stays as the fallback otherwise.
+    // base + reserve + rollover, and the line is capped by the governor's own
+    // published usable value. The governor can publish the reserve and the
+    // rollover pool as the SAME money (zai-max day 2: reserve 4.2857 and
+    // rollover pool 4.2857, usable 14.2857), so summing all three would
+    // double-count it. Allowed = min(governor usable, base+reserve+rollover);
+    // the strip then carries base, the reserve, and whatever rollover is left
+    // of the line — so the visible sum always equals the published line.
     if (base !== null && reserve !== null && rollover !== null) {
-      allowedToday = base + reserve + rollover;
+      const sum = base + reserve + rollover;
+      allowedToday = governorUsable === null ? sum : Math.min(governorUsable, sum);
+      if (allowedToday < base) {
+        base = allowedToday;
+        reserve = 0;
+        rollover = 0;
+      } else {
+        const reserveRoom = allowedToday - base;
+        if (reserve > reserveRoom) reserve = reserveRoom;
+        rollover = allowedToday - base - reserve;
+      }
+    } else if (allowedToday === null) {
+      allowedToday = governorUsable;
     }
 
     // --- pace + projection (mirror of the console's day maths) -------------
