@@ -57,6 +57,10 @@ function writeGovernorFile(overrides?: { minimaxDecision?: Record<string, unknow
             floor_pct: 4,
             weekly_headroom_pct: 73,
             five_h_headroom_pct: 18.4,
+            day_number: 2,
+            day_index: 1,
+            ration_model: 'owner-v3',
+            anchor: { anchor_epoch: NOW_EPOCH + 4 * 86400, source: 'codexbar-port', stale: false },
           },
         },
         'zai-pro': {
@@ -75,6 +79,10 @@ function writeGovernorFile(overrides?: { minimaxDecision?: Record<string, unknow
             floor_pct: 4,
             weekly_headroom_pct: 6,
             five_h_headroom_pct: 19.2,
+            day_number: 5,
+            day_index: 4,
+            ration_model: 'owner-v3',
+            anchor: { anchor_epoch: NOW_EPOCH + 86400, source: 'codexbar-port', stale: false },
           },
         },
         minimax: {
@@ -93,6 +101,10 @@ function writeGovernorFile(overrides?: { minimaxDecision?: Record<string, unknow
             floor_pct: 0,
             weekly_headroom_pct: 88,
             five_h_headroom_pct: null,
+            day_number: 1,
+            day_index: 0,
+            ration_model: 'owner-v3',
+            anchor: { anchor_epoch: NOW_EPOCH + 2 * 86400, source: 'provider-own', stale: false },
             ...(overrides?.minimaxDecision ?? {}),
           },
         },
@@ -321,5 +333,29 @@ describe('public quota data path (ret500-nodupe)', () => {
         backup.formula.rollover_pool_pct!,
     ).toBeCloseTo(backup.allowed_today_pct!, 6);
     expect(backup.allowed_today_pct).toBeCloseTo(10, 6);
+  });
+
+  it('serves each wallet on its OWN day clock (day number + own week reset)', async () => {
+    const feed = await makeService(
+      makeQuota(
+        snapshot({ RCR: 72, CCR: 72, 'RCR MM': 87, 'RCR Backup': 5 }, NOW.toISOString()),
+      ),
+      makeRepos(),
+    ).feed();
+
+    // Three wallets, three own days — never one shared day.
+    expect(feed.wallets.MAIN.day_number).toBe(2);
+    expect(feed.wallets.MAIN.day_index).toBe(1);
+    expect(feed.wallets.MM.day_number).toBe(1);
+    expect(feed.wallets.MM.day_index).toBe(0);
+    expect(feed.wallets.BACKUP.day_number).toBe(5);
+    expect(feed.wallets.BACKUP.day_index).toBe(4);
+
+    // The daily reset clock and each wallet's own week reset anchor.
+    expect(feed.wallets.MAIN.day_start_utc).toBe('10:05');
+    expect(feed.wallets.MAIN.week_reset_at).toBe(
+      new Date((NOW_EPOCH + 4 * 86400) * 1000).toISOString(),
+    );
+    expect(feed.wallets.MAIN.ration_model).toBe('owner-v3');
   });
 });

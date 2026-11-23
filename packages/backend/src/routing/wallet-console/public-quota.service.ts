@@ -81,6 +81,16 @@ export interface PublicQuotaWallet {
   five_h_reset_at: string | null;
   /** Governor-published share of the weekly pool already spent. */
   weekly_spent_pct: number | null;
+  /** The wallet's OWN ration day number (1-based, the governor's own clock). */
+  day_number: number | null;
+  /** The wallet's own ration day index (0-based within the ration week). */
+  day_index: number | null;
+  /** UTC clock the ration day starts at (the daily reset clock). */
+  day_start_utc: string | null;
+  /** The wallet's own provider-own week reset anchor (its own week clock). */
+  week_reset_at: string | null;
+  /** The governor's ration model label, verbatim. */
+  ration_model: string | null;
   /** Pace vs even spread + projection (server-computed, never client maths). */
   pace: PublicPace | null;
   pace_pct_per_h: number | null;
@@ -400,6 +410,11 @@ export class PublicQuotaService {
     let accountNumbersKnown = false;
     /** The governor's own published usable line, when it publishes one. */
     let governorUsable: number | null = null;
+    /** The wallet's OWN day clock (the governor's published day numbers). */
+    let dayNumber: number | null = null;
+    let dayIndex: number | null = null;
+    let weekResetAt: string | null = null;
+    let rationModel: string | null = null;
     for (const account of entry.accountNames) {
       const status = ration.accounts[account];
       if (!status) continue;
@@ -413,6 +428,16 @@ export class PublicQuotaService {
       rollover = pickSum(rollover, decNum(decision.rollover_pool_pct));
       floor = pickSum(floor, decNum(decision.floor_pct));
       if (decision.halt === true || decision.allow === false) haltedByGovernor = true;
+      // Day numbers are per-wallet: each wallet runs its own day clock.
+      if (dayNumber === null) dayNumber = decNum(decision.day_number);
+      if (dayIndex === null) dayIndex = decNum(decision.day_index);
+      if (rationModel === null && typeof decision.ration_model === 'string') {
+        rationModel = decision.ration_model;
+      }
+      if (weekResetAt === null) {
+        const anchorEpoch = decNum(decision.anchor?.anchor_epoch);
+        weekResetAt = anchorEpoch === null ? null : new Date(anchorEpoch * 1000).toISOString();
+      }
     }
     if (!accountNumbersKnown) {
       if (ration.available) notes.push('no ration account published for this wallet');
@@ -487,6 +512,11 @@ export class PublicQuotaService {
       five_h_pct_left: fiveHLeft,
       five_h_reset_at: fiveHReset,
       weekly_spent_pct: weeklySpent,
+      day_number: dayNumber,
+      day_index: dayIndex,
+      day_start_utc: ration.day_start_utc,
+      week_reset_at: weekResetAt,
+      ration_model: rationModel,
       pace,
       pace_pct_per_h: pacePerH === null ? null : round(pacePerH, 4),
       projected_end_pct: projectedEnd === null ? null : round(projectedEnd, 3),
@@ -566,6 +596,11 @@ export class PublicQuotaService {
       five_h_pct_left: null,
       five_h_reset_at: null,
       weekly_spent_pct: null,
+      day_number: null,
+      day_index: null,
+      day_start_utc: null,
+      week_reset_at: null,
+      ration_model: null,
       pace: null,
       pace_pct_per_h: null,
       projected_end_pct: null,
