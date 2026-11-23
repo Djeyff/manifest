@@ -1184,7 +1184,7 @@ export class ProxyFallbackService {
       opts.model,
       opts.hopReasoningEffort,
     );
-    const merged = mergedBody;
+    const merged = { body: mergedBody, overrides: mergedOverrides };
     // Agent-scope fallback for providers (OpenCode) that need a session id on
     // every request even when the caller sent no x-session-key. NUL-joined so
     // distinct (tenant, agent) pairs can never collide before hashing.

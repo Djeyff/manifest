@@ -167,24 +167,6 @@ export function bedrockRuntimeChatNeedsResponses(
 }
 
 /**
- * True when a Chat Completions request for a catalogued GPT profile must go to
- * Runtime Responses: Runtime Chat Completions rejects function tools next to
- * any reasoning effort but `none` (mnfst/llm-gateway#3107). "GPT" is
- * `max_completion_tokens`, the same test the chat path uses for #3075, on
- * purpose: both fixes cover exactly the same models.
- */
-export function bedrockRuntimeChatNeedsResponses(
-  model: string,
-  body: Record<string, unknown>,
-): boolean {
-  const capabilities = getBedrockRuntimeCapabilities(model);
-  if (capabilities?.chatTokenParameter !== 'max_completion_tokens') return false;
-  if (!hasFunctionTools(body.tools)) return false;
-  if (capabilities.rejectsReasoningNone) return true;
-  return typeof body.reasoning_effort === 'string' && body.reasoning_effort !== 'none';
-}
-
-/**
  * True for a CRIS profile whose base model is a verified Runtime Messages
  * Claude model. Base model IDs return false: Mantle serves those.
  */
