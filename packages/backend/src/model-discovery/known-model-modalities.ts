@@ -35,6 +35,11 @@ const TEXT_TOOLS: KnownCapabilities = {
 /** Keyed by `<provider-id>/<model-id>`, lowercase. */
 const KNOWN_MODEL_MODALITIES: Readonly<Record<string, KnownCapabilities>> = {
   'minimax/minimax-m3.1-flash': TEXT_IMAGE_TOOLS,
+  // ZAI's subscription/coding-plan endpoints publish no modality metadata and
+  // models.dev is silent on these ids. glm-5.3-flash accepts image input
+  // (RET-744, owner msg 1574568418185711757: enable vision for CCR tiers;
+  // verified by a live image-content ride through the gateway — card t_d52953b2).
+  'zai/glm-5.3-flash': TEXT_IMAGE_TOOLS,
   // ChatGPT subscription (Codex models API) publishes no modality metadata,
   // and models.dev lags behind new launches. These facts bootstrap the
   // subscription catalog until an upstream source carries them (#2537).
