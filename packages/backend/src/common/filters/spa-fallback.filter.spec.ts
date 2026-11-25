@@ -75,6 +75,34 @@ describe('SpaFallbackFilter', () => {
       expect(res.send).toHaveBeenCalledWith(SAMPLE_HTML);
     });
 
+    it('returns a real 404 for an unknown SPA route instead of the 200 shell', () => {
+      const { host, res } = createMockHost('GET', '/nonexistent-spa-route');
+      filter.catch(exception, host);
+      expect(res.status).toHaveBeenCalledWith(404);
+      expect(res.setHeader).toHaveBeenCalledWith('Content-Type', 'text/html');
+      const sent = (res.send as jest.Mock).mock.calls[0][0] as string;
+      expect(sent).not.toBe(SAMPLE_HTML);
+      expect(sent).toContain('404');
+    });
+
+    it('replaces the framework 404 body for GET to /api/ routes', () => {
+      const frameworkNotFound = new NotFoundException('Cannot GET /api/v1/nonexistent');
+      const { host, res } = createMockHost('GET', '/api/v1/nonexistent');
+      filter.catch(frameworkNotFound, host);
+      expect(res.status).toHaveBeenCalledWith(404);
+      expect(res.json).toHaveBeenCalledWith({ error: 'not_found' });
+    });
+
+    it('keeps an application-raised 404 message intact', () => {
+      const appNotFound = new NotFoundException('wallet not found');
+      const { host, res } = createMockHost('GET', '/api/v1/wallets/nope');
+      filter.catch(appNotFound, host);
+      expect(res.status).toHaveBeenCalledWith(404);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'wallet not found' }),
+      );
+    });
+
     it('returns JSON 404 for GET to /api/ routes', () => {
       const { host, res } = createMockHost('GET', '/api/v1/nonexistent');
       filter.catch(exception, host);
