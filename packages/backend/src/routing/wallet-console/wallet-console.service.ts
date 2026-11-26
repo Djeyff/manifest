@@ -16,7 +16,9 @@ import {
   WalletSettingsAudit,
 } from '../../entities/wallet-settings.entity';
 import { TenantProvider } from '../../entities/tenant-provider.entity';
+import { WalletOwnerIntent } from '../../entities/wallet-owner-intent.entity';
 import { DecisionLedgerService, MintedRuling } from './decision-ledger.service';
+import { readRationState } from './ration-state';
 
 /**
  * Wallet settings service (RET-720 scope a → D-2026-11-22-11/-13).
@@ -93,6 +95,44 @@ export interface WalletSettingsUpdateResult {
   ruling: MintedRuling | null;
 }
 
+/** The intent actions this surface accepts (RET-776-B contract: exactly these two). */
+export const WALLET_INTENT_ACTIONS = ['pause', 'resume'] as const;
+export type WalletIntentAction = (typeof WALLET_INTENT_ACTIONS)[number];
+
+/** Owner free-text reason cap (RET-776-B D2). */
+export const WALLET_INTENT_REASON_MAX = 500;
+
+/** The runtime state a wallet reports (RET-776-B D4). */
+export type WalletRuntimeState = 'running' | 'paused_by_owner' | 'parked_by_governor';
+
+/**
+ * Wallet state view (RET-776-B D4). The quota numbers are NOT computed here:
+ * the CONTROLLER merges them from PublicQuotaService.feed() — a service-only
+ * read serves them as null + stale, so line math can never fork from the feed.
+ */
+export interface WalletStateView {
+  wallet_id: string;
+  name: string;
+  state: WalletRuntimeState;
+  daily_left_pct: number | null;
+  weekly_left_pct: number | null;
+  read_at: string | null;
+  numbers_stale: boolean;
+  last_intent: { action: string; actor: string; at: string } | null;
+  keys_active: boolean;
+}
+
+export interface WalletIntentWriteResult {
+  changed: boolean;
+  action: WalletIntentAction;
+  /** The governed accounts the intent rows were written for. */
+  accounts: string[];
+  intent: { action: string; actor: string; reason: string; at: string } | null;
+  audit_id: string | null;
+  ruling: MintedRuling | null;
+  state: WalletStateView;
+}
+
 const PRIORITY_MIN = 0;
 const PRIORITY_MAX = 1000;
 
@@ -120,10 +160,16 @@ export class WalletConsoleService {
     @InjectRepository(WalletSettingsAudit)
     private readonly auditRepo: Repository<WalletSettingsAudit>,
     private readonly ledger: DecisionLedgerService,
+    @InjectRepository(WalletOwnerIntent)
+    private readonly intentRepo: Repository<WalletOwnerIntent>,
   ) {}
 
   /** Current settings for a wallet (defaults when the wallet was never tuned). */
-  async getSettings(tenantId: string, userId: string | null, walletId: string): Promise<WalletSettingsView> {
+  async getSettings(
+    tenantId: string,
+    userId: string | null,
+    walletId: string,
+  ): Promise<WalletSettingsView> {
     await this.assertOwner(tenantId, userId);
     const wallet = await this.findWallet(tenantId, walletId);
     const row = await this.settingsRepo.findOne({ where: { wallet_id: wallet.id } });
@@ -209,6 +255,144 @@ export class WalletConsoleService {
     return { settings: after, changed: true, audit_id: audit.id, ruling };
   }
 
+  /**
+   * Record the owner's pause/resume INTENT (RET-776-B).
+   *
+   * The intent is a ROW in wallet_owner_intents — keys are NEVER flipped
+   * here; the governor + tick (RET-776-A) read the table and park/unpark.
+   * One row is inserted per governed account whose LATEST intent differs
+   * (insert, not save — every column is a primary column); repeating the
+   * same action is a no-op (no row, no audit, no mint). Every write also
+   * gets a wallet_settings_audit row + a decisions-ledger ruling, exactly
+   * like a settings change.
+   */
+  async setOwnerIntent(
+    tenantId: string,
+    userId: string | null,
+    walletId: string,
+    input: { action?: unknown; reason?: unknown },
+  ): Promise<WalletIntentWriteResult> {
+    await this.assertOwner(tenantId, userId);
+    if (!userId) throw new UnauthorizedException('An authenticated user is required');
+    const action = WALLET_INTENT_ACTIONS.find((a) => a === input?.action);
+    if (!action) throw new BadRequestException("action must be 'pause' or 'resume'");
+    if (input.reason !== undefined && input.reason !== null && typeof input.reason !== 'string') {
+      throw new BadRequestException('reason must be a string');
+    }
+    const reason = typeof input.reason === 'string' ? input.reason.trim() : '';
+    if (reason.length > WALLET_INTENT_REASON_MAX) {
+      throw new BadRequestException(
+        `reason must be at most ${WALLET_INTENT_REASON_MAX} characters`,
+      );
+    }
+    const wallet = await this.findWallet(tenantId, walletId);
+    const accounts = await this.governedAccounts(tenantId, wallet.id);
+    if (accounts.length === 0) {
+      throw new BadRequestException('no governed account behind this wallet');
+    }
+
+    const before = await this.stateViewOf(wallet, tenantId);
+    const pending: string[] = [];
+    const latestByAccount = new Map<string, WalletOwnerIntent | null>();
+    for (const account of accounts) {
+      const latest = await this.latestIntentFor(account);
+      latestByAccount.set(account, latest);
+      if (latest?.action !== action) pending.push(account);
+    }
+    if (pending.length === 0) {
+      const last = this.newestOf(latestByAccount);
+      return {
+        changed: false,
+        action,
+        accounts,
+        intent: last
+          ? { action: last.action, actor: last.actor, reason: last.reason, at: last.created_at }
+          : null,
+        audit_id: null,
+        ruling: null,
+        state: before,
+      };
+    }
+
+    const actor: string = userId;
+    const now = new Date().toISOString();
+    const summary = `owner ${action} intent for wallet ${wallet.name} (${pending.join(', ')})${
+      reason ? `: ${reason}` : ''
+    }`;
+    const ruling = await this.ledger.mint({
+      tenant_id: tenantId,
+      wallet_id: wallet.id,
+      actor_user_id: actor,
+      action: `intent.${action}`,
+      summary,
+      before: { state: before.state } as unknown as Record<string, unknown>,
+      after: {
+        intent: { action, actor, reason, at: now },
+        accounts: pending,
+      } as unknown as Record<string, unknown>,
+    });
+
+    const audit = Object.assign(new WalletSettingsAudit(), {
+      id: randomUUID(),
+      wallet_id: wallet.id,
+      tenant_id: tenantId,
+      actor_user_id: actor,
+      action: `intent.${action}`,
+      before: { state: before.state } as unknown as Record<string, unknown>,
+      after: {
+        intent: { action, actor, reason, at: now },
+        accounts: pending,
+      } as unknown as Record<string, unknown>,
+      ruling_id: ruling.id,
+      created_at: now,
+    });
+    await this.auditRepo.save(audit);
+
+    for (const account of pending) {
+      // The composite PK includes created_at: nudge the stamp past the newest
+      // row this intent replaces so two writes can never collide on it.
+      const latest = latestByAccount.get(account);
+      const stamp =
+        latest && latest.created_at >= now
+          ? new Date(Date.parse(latest.created_at) + 1).toISOString()
+          : now;
+      await this.intentRepo.insert(
+        Object.assign(new WalletOwnerIntent(), {
+          account,
+          action,
+          actor,
+          reason,
+          created_at: stamp,
+        }),
+      );
+    }
+
+    const state = await this.stateViewOf(wallet, tenantId);
+    return {
+      changed: true,
+      action,
+      accounts: pending,
+      intent: { action, actor, reason, at: now },
+      audit_id: audit.id,
+      ruling,
+      state,
+    };
+  }
+
+  /**
+   * The wallet's runtime state (RET-776-B D4). Quota numbers stay null here —
+   * the controller merges them from PublicQuotaService.feed().
+   */
+  async getWalletState(
+    tenantId: string,
+    userId: string | null,
+    walletId: string,
+  ): Promise<WalletStateView> {
+    await this.assertOwner(tenantId, userId);
+    const wallet = await this.findWallet(tenantId, walletId);
+    return this.stateViewOf(wallet, tenantId);
+  }
+
   /** Audit trail for a wallet (newest first). */
   async listAudit(
     tenantId: string,
@@ -283,10 +467,7 @@ export class WalletConsoleService {
    * tenant's provider keys, each with the room it serves and the wallet it is
    * currently bound to. This is the ONLY place wallet→key bindings change.
    */
-  async listProviderKeys(
-    tenantId: string,
-    userId: string | null,
-  ): Promise<ProviderKeyView[]> {
+  async listProviderKeys(tenantId: string, userId: string | null): Promise<ProviderKeyView[]> {
     await this.assertOwner(tenantId, userId);
     const keys = await this.providerRepo.find({ where: { tenant_id: tenantId } });
     const members = await this.memberRepo.find({ where: { tenant_id: tenantId } });
@@ -322,9 +503,106 @@ export class WalletConsoleService {
     return wallet;
   }
 
+  /**
+   * Governed accounts behind a wallet (RET-776-B D2): the unique ration
+   * account of each member key — account := ration.account_by_key[label],
+   * NEVER the wallet id or the key label. Empty = nothing to govern.
+   */
+  private async governedAccounts(tenantId: string, walletId: string): Promise<string[]> {
+    const members = await this.memberRepo.find({
+      where: { wallet_id: walletId, tenant_id: tenantId },
+    });
+    if (members.length === 0) return [];
+    const keys = await this.providerRepo.find({
+      where: { tenant_id: tenantId },
+      select: ['id', 'label', 'provider'],
+    });
+    const keyById = new Map(keys.map((k) => [k.id, k]));
+    const ration = readRationState();
+    const accounts = new Set<string>();
+    for (const member of members) {
+      const label = keyById.get(member.tenant_provider_id)?.label ?? '';
+      const account = ration.account_by_key[label];
+      if (account) accounts.add(account);
+    }
+    return [...accounts].sort();
+  }
+
+  /** The newest intent row of one account — the governor's read: latest wins. */
+  private latestIntentFor(account: string): Promise<WalletOwnerIntent | null> {
+    return this.intentRepo.findOne({ where: { account }, order: { created_at: 'DESC' } });
+  }
+
+  /** The newest row across a wallet's governed accounts (null = no intent). */
+  private async lastIntentForAccounts(accounts: string[]): Promise<WalletOwnerIntent | null> {
+    const rows: WalletOwnerIntent[] = [];
+    for (const account of accounts) {
+      const row = await this.latestIntentFor(account);
+      if (row) rows.push(row);
+    }
+    return this.newestOf(new Map(rows.map((r) => [r.account, r])));
+  }
+
+  private newestOf(byAccount: Map<string, WalletOwnerIntent | null>): WalletOwnerIntent | null {
+    let newest: WalletOwnerIntent | null = null;
+    for (const row of byAccount.values()) {
+      if (row && (newest === null || row.created_at > newest.created_at)) newest = row;
+    }
+    return newest;
+  }
+
+  /**
+   * Build the state view. Owner intent outranks governor parking: the owner
+   * said pause, the wallet stays paused_by_owner even if the governor also
+   * parked it. Quota numbers are merged by the controller from the feed.
+   */
+  private async stateViewOf(wallet: Wallet, tenantId: string): Promise<WalletStateView> {
+    const accounts = await this.governedAccounts(tenantId, wallet.id);
+    const lastIntent = accounts.length > 0 ? await this.lastIntentForAccounts(accounts) : null;
+    const settings = await this.settingsRepo.findOne({ where: { wallet_id: wallet.id } });
+    const members = await this.memberRepo.find({
+      where: { wallet_id: wallet.id, tenant_id: tenantId },
+    });
+    const keys =
+      members.length > 0
+        ? await this.providerRepo.find({
+            where: { tenant_id: tenantId },
+            select: ['id', 'label', 'provider', 'is_active'],
+          })
+        : [];
+    const keyById = new Map(keys.map((k) => [k.id, k]));
+    const keysActive =
+      members.length > 0 &&
+      members.every((m) => keyById.get(m.tenant_provider_id)?.is_active === true);
+    const governorParked =
+      members.length > 0 &&
+      members.some((m) => keyById.get(m.tenant_provider_id)?.is_active === false);
+    const state: WalletRuntimeState =
+      lastIntent?.action === 'pause'
+        ? 'paused_by_owner'
+        : (settings?.parked ?? false) || governorParked
+          ? 'parked_by_governor'
+          : 'running';
+    return {
+      wallet_id: wallet.id,
+      name: wallet.name,
+      state,
+      daily_left_pct: null,
+      weekly_left_pct: null,
+      read_at: null,
+      numbers_stale: true,
+      last_intent: lastIntent
+        ? { action: lastIntent.action, actor: lastIntent.actor, at: lastIntent.created_at }
+        : null,
+      keys_active: keysActive,
+    };
+  }
+
   /** The wallet's current bindings, resolved against the registered keys. */
   private async bindingsOf(tenantId: string, walletId: string): Promise<WalletKeyBinding[]> {
-    const members = await this.memberRepo.find({ where: { wallet_id: walletId, tenant_id: tenantId } });
+    const members = await this.memberRepo.find({
+      where: { wallet_id: walletId, tenant_id: tenantId },
+    });
     if (members.length === 0) return [];
     const keys = await this.providerRepo.find({
       where: { tenant_id: tenantId },
@@ -355,10 +633,15 @@ export class WalletConsoleService {
     desired: Array<{ room: string; tenant_provider_id: string }>,
   ): Promise<void> {
     const wanted = new Set(desired.map((d) => d.tenant_provider_id));
-    const current = await this.memberRepo.find({ where: { wallet_id: walletId, tenant_id: tenantId } });
+    const current = await this.memberRepo.find({
+      where: { wallet_id: walletId, tenant_id: tenantId },
+    });
     for (const member of current) {
       if (!wanted.has(member.tenant_provider_id)) {
-        await this.memberRepo.delete({ wallet_id: walletId, tenant_provider_id: member.tenant_provider_id });
+        await this.memberRepo.delete({
+          wallet_id: walletId,
+          tenant_provider_id: member.tenant_provider_id,
+        });
       }
     }
     const have = new Set(current.map((m) => m.tenant_provider_id));
@@ -431,7 +714,8 @@ export class WalletConsoleService {
       patch.drain_day_enabled = input.drain_day_enabled;
     }
     if (input?.parked !== undefined) {
-      if (typeof input.parked !== 'boolean') throw new BadRequestException('parked must be a boolean');
+      if (typeof input.parked !== 'boolean')
+        throw new BadRequestException('parked must be a boolean');
       patch.parked = input.parked;
     }
     if (input?.kill_switch_fallback !== undefined) {
@@ -557,13 +841,18 @@ export class WalletConsoleService {
     if (before.drain_day_enabled !== after.drain_day_enabled) {
       parts.push(`drain_day_enabled ${before.drain_day_enabled} -> ${after.drain_day_enabled}`);
     }
-    if (before.priority !== after.priority) parts.push(`priority ${before.priority} -> ${after.priority}`);
+    if (before.priority !== after.priority)
+      parts.push(`priority ${before.priority} -> ${after.priority}`);
     if (before.parked !== after.parked) parts.push(`parked ${before.parked} -> ${after.parked}`);
     if (before.kill_switch_fallback !== after.kill_switch_fallback) {
-      parts.push(`kill_switch_fallback ${before.kill_switch_fallback} -> ${after.kill_switch_fallback}`);
+      parts.push(
+        `kill_switch_fallback ${before.kill_switch_fallback} -> ${after.kill_switch_fallback}`,
+      );
     }
     if (before.reserve_pct !== after.reserve_pct) {
-      parts.push(`reserve_pct ${before.reserve_pct ?? 'governor'} -> ${after.reserve_pct ?? 'governor'}`);
+      parts.push(
+        `reserve_pct ${before.reserve_pct ?? 'governor'} -> ${after.reserve_pct ?? 'governor'}`,
+      );
     }
     if (before.rollover_enabled !== after.rollover_enabled) {
       parts.push(`rollover_enabled ${before.rollover_enabled} -> ${after.rollover_enabled}`);
@@ -574,7 +863,9 @@ export class WalletConsoleService {
     if (JSON.stringify(before.daily_lines ?? null) !== JSON.stringify(after.daily_lines ?? null)) {
       parts.push('daily_lines updated');
     }
-    if (JSON.stringify(before.key_bindings ?? null) !== JSON.stringify(after.key_bindings ?? null)) {
+    if (
+      JSON.stringify(before.key_bindings ?? null) !== JSON.stringify(after.key_bindings ?? null)
+    ) {
       const names = after.key_bindings.map((b) => `${b.room}:${b.label}`).join(', ');
       parts.push(`key bindings updated (${names || 'none'})`);
     }
