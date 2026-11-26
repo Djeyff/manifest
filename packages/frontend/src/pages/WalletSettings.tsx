@@ -16,6 +16,8 @@ import {
 } from '../services/api/wallet-settings.js';
 import { walletDisplayName } from '../services/api/wallet-options.js';
 import { Callout, Pill } from '../components/wallet-console/Console';
+import WalletIntentControl from '../components/wallet-console/WalletIntentControl.js';
+import { getWalletConsoleAccess } from '../services/api/wallet-console.js';
 
 /**
  * Wallet settings — the real editor (RET-720, owner order D-2026-11-22-13).
@@ -76,6 +78,14 @@ export default function WalletSettings() {
       })),
     );
     return { wallets, keys, entries };
+  });
+
+  const [access] = createResource(async () => {
+    try {
+      return await getWalletConsoleAccess();
+    } catch {
+      return { owner: false, available: false };
+    }
   });
 
   const [drafts, setDrafts] = createSignal<Record<string, WalletDraft>>({});
@@ -194,7 +204,9 @@ export default function WalletSettings() {
             <Show when={status()}>
               {(note) => (
                 <div role={note().tone === 'danger' ? 'alert' : 'status'}>
-                  <Callout tone={note().tone === 'danger' ? 'danger' : 'info'}>{note().text}</Callout>
+                  <Callout tone={note().tone === 'danger' ? 'danger' : 'info'}>
+                    {note().text}
+                  </Callout>
                 </div>
               )}
             </Show>
@@ -240,7 +252,8 @@ export default function WalletSettings() {
                             }
                           />
                           <span class="wc-field__hint" id={`base-hint-${entry.wallet.id}`}>
-                            % of the weekly pool allowed per ration day. Empty leaves the server value.
+                            % of the weekly pool allowed per ration day. Empty leaves the server
+                            value.
                           </span>
                         </div>
 
@@ -330,7 +343,8 @@ export default function WalletSettings() {
 
                       <div class="wc-panel" aria-labelledby={`keys-${entry.wallet.id}`}>
                         <div class="wc-panel__title" id={`keys-${entry.wallet.id}`}>
-                          Key bindings <span class="sub">which registered key serves each room</span>
+                          Key bindings{' '}
+                          <span class="sub">which registered key serves each room</span>
                         </div>
                         <Show
                           when={rooms().length > 0}
@@ -349,7 +363,10 @@ export default function WalletSettings() {
                                 'not bound';
                               return (
                                 <div>
-                                  <label class="wc-field__label" for={`binding-${entry.wallet.id}-${room}`}>
+                                  <label
+                                    class="wc-field__label"
+                                    for={`binding-${entry.wallet.id}-${room}`}
+                                  >
                                     {room} room
                                   </label>
                                   <select
@@ -375,8 +392,8 @@ export default function WalletSettings() {
                                     class="wc-field__hint"
                                     id={`binding-hint-${entry.wallet.id}-${room}`}
                                   >
-                                    Currently {boundLabel()}. Saving replaces this wallet's keys with
-                                    exactly the ones selected here.
+                                    Currently {boundLabel()}. Saving replaces this wallet's keys
+                                    with exactly the ones selected here.
                                   </span>
                                 </div>
                               );
@@ -384,6 +401,12 @@ export default function WalletSettings() {
                           </For>
                         </Show>
                       </div>
+
+                      <WalletIntentControl
+                        walletId={entry.wallet.id}
+                        walletName={displayName()}
+                        access={access()}
+                      />
 
                       <div class="wc-panel" aria-labelledby={`audit-${entry.wallet.id}`}>
                         <div class="wc-panel__title" id={`audit-${entry.wallet.id}`}>
@@ -414,10 +437,13 @@ export default function WalletSettings() {
                           </div>
                         </Show>
                         <p class="wc-note">
-                          <Pill tone="neutral">{entry.settings.rollover_enabled ? 'rollover on' : 'rollover off'}</Pill>
-                          {' '}
                           <Pill tone="neutral">
-                            {entry.settings.cross_class_pause ? 'cross-class pause on' : 'cross-class pause off'}
+                            {entry.settings.rollover_enabled ? 'rollover on' : 'rollover off'}
+                          </Pill>{' '}
+                          <Pill tone="neutral">
+                            {entry.settings.cross_class_pause
+                              ? 'cross-class pause on'
+                              : 'cross-class pause off'}
                           </Pill>
                           {entry.settings.updated_at ? (
                             <span class="wc-note"> · last change {entry.settings.updated_at}</span>

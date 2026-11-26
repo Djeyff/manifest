@@ -91,6 +91,114 @@ export interface WalletSettingsUpdateResult {
   ruling: MintedRuling | null;
 }
 
+/**
+ * An error that carries the HTTP status, so the UI can tell a refusal
+ * (403 = not the owner) from a bad request (400 = the server's own sentence)
+ * from anything else.
+ */
+export class WalletApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'WalletApiError';
+    this.status = status;
+  }
+}
+
+/** The three governed wallet states (RET-776-B, `GET /wallets/:id/state`). */
+export type WalletStateKind = 'running' | 'paused_by_owner' | 'parked_by_governor';
+
+/** The live state of one wallet as the server serves it. */
+export interface WalletState {
+  wallet_id: string;
+  name: string;
+  state: WalletStateKind;
+  daily_left_pct: number | null;
+  weekly_left_pct: number | null;
+  /** When the numbers behind this state were read. */
+  read_at: string | null;
+  /** The numbers are older than the server's own freshness window. */
+  numbers_stale: boolean;
+  /** The owner's last pause/resume intent on this wallet, if any. */
+  last_intent: { action: string; actor: string | null; at: string | null } | null;
+  keys_active: boolean;
+}
+
+/** The intent row the server mints for a pause/resume. */
+export interface WalletIntentRow {
+  action: string;
+  actor: string | null;
+  reason: string | null;
+  at: string;
+}
+
+/** The `POST /wallets/:id/intent` response. */
+export interface WalletIntentResult {
+  changed: boolean;
+  action: string;
+  accounts: string[];
+  intent: WalletIntentRow;
+  audit_id: string | null;
+  ruling: MintedRuling | null;
+  /** The state as the server sees it after the intent — the source of truth. */
+  state: WalletState;
+}
+
+/**
+ * GET the live state of one wallet.
+ *
+ * The route is `/wallets/:id/state`, NOT `/wallets/:id`: the latter is the
+ * wallet-record route (RET-692-FU1) and would shadow this one.
+ *
+ * A refusal carries its status: 403 (not the owner) and 404 (feature off /
+ * no session) are real answers the UI renders, not transport failures.
+ */
+export async function fetchWalletState(walletId: string): Promise<WalletState> {
+  const res = await fetch(`${BASE_URL}/wallets/${encodeURIComponent(walletId)}/state`, {
+    credentials: 'include',
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    throw new WalletApiError(res.status, await parseErrorMessage(res));
+  }
+  const body = (await res.json()) as { state?: WalletState };
+  if (!body?.state) throw new WalletApiError(502, 'The server did not return a wallet state.');
+  return body.state;
+}
+
+/**
+ * Ask the server to pause or resume a wallet.
+ *
+ * The response carries the state the server ended up in — but the UI still
+ * re-reads `GET /wallets/:id/state` afterwards, because a 200 with
+ * `changed: false` means the intent was a no-op.
+ */
+export async function postWalletIntent(
+  walletId: string,
+  action: 'pause' | 'resume',
+  reason?: string,
+): Promise<WalletIntentResult> {
+  const res = await fetch(`${BASE_URL}/wallets/${encodeURIComponent(walletId)}/intent`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(reason ? { action, reason } : { action }),
+  });
+  if (!res.ok) {
+    throw new WalletApiError(res.status, await parseErrorMessage(res));
+  }
+  return (await res.json()) as WalletIntentResult;
+}
+
+/** The intent rows of a wallet's audit trail (newest first). */
+export const INTENT_ACTIONS = ['intent.pause', 'intent.resume'];
+
+/** The last five pause/resume rows of a wallet's audit trail. */
+export function intentRowsFromAudit(audit: WalletAuditRow[]): WalletAuditRow[] {
+  return audit.filter((row) => INTENT_ACTIONS.includes(row.action)).slice(0, 5);
+}
+
 /** A wallet of the tenant (`GET /wallets`). */
 export interface WalletListItem {
   id: string;
@@ -189,10 +297,7 @@ export async function fetchProviderKeys(): Promise<ProviderKeyView[]> {
  * The rooms the owner can bind a key in: every room the tenant has a
  * registered key for, plus every room the wallet already has a binding in.
  */
-export function bindingRooms(
-  keys: ProviderKeyView[],
-  bindings: WalletKeyBinding[],
-): string[] {
+export function bindingRooms(keys: ProviderKeyView[], bindings: WalletKeyBinding[]): string[] {
   const rooms = new Set<string>();
   for (const key of keys) if (key.room) rooms.add(key.room);
   for (const binding of bindings) if (binding.room) rooms.add(binding.room);
