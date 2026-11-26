@@ -1,6 +1,9 @@
 import { createEffect, createSignal, For, onCleanup, Show, type Component } from 'solid-js';
 import type { RoutingProvider } from '../services/api.js';
 import { canonicalKeyLabel, type WalletOption } from '../services/api/wallet-options.js';
+import { useWalletStates } from '../services/api/wallet-states.js';
+import { WalletChip } from './wallet-console/Console.js';
+import type { WalletState } from '../services/api/wallet-settings.js';
 
 interface RouteKeyChipProps {
   keys: RoutingProvider[];
@@ -23,8 +26,26 @@ interface RouteKeyChipProps {
   wallets?: () => WalletOption[];
 }
 
+/** The tone of the read-only state pill for a wallet state. */
+function stateTone(state: WalletState['state']): string {
+  if (state === 'running') return 'running';
+  if (state === 'paused_by_owner') return 'paused';
+  return 'parked';
+}
+
+/** The label of the read-only state pill for a wallet state. */
+function stateLabel(state: WalletState['state']): string {
+  if (state === 'running') return 'Running';
+  if (state === 'paused_by_owner') return 'Paused by owner';
+  return 'Parked by governor';
+}
+
 const RouteKeyChip: Component<RouteKeyChipProps> = (props) => {
   const [open, setOpen] = createSignal(false);
+  // Live wallet states, for the READ-ONLY state pill in the dropdown
+  // (architect decision DC1). No action lives here — the pause/unpause
+  // control is on /wallets/settings.
+  const walletStates = useWalletStates();
   let containerRef: HTMLSpanElement | undefined;
 
   createEffect(() => {
@@ -50,8 +71,7 @@ const RouteKeyChip: Component<RouteKeyChipProps> = (props) => {
    * first member key label in the order the server returned it. The wallet ->
    * key mapping is automatic; the owner never picks a room key.
    */
-  const keyLabelForWallet = (wallet: WalletOption): string | undefined =>
-    canonicalKeyLabel(wallet);
+  const keyLabelForWallet = (wallet: WalletOption): string | undefined => canonicalKeyLabel(wallet);
 
   /** The wallet that owns the currently pinned key label. */
   const currentWallet = (): WalletOption | undefined => {
@@ -125,8 +145,7 @@ const RouteKeyChip: Component<RouteKeyChipProps> = (props) => {
             <For each={walletOptions()}>
               {(wallet) => {
                 const label = () => keyLabelForWallet(wallet);
-                const isUsedElsewhere = () =>
-                  usedLabels().has((label() ?? '').toLowerCase());
+                const isUsedElsewhere = () => usedLabels().has((label() ?? '').toLowerCase());
                 const isSelected = () => {
                   const current = props.currentLabel;
                   if (!current) return false;
@@ -140,10 +159,17 @@ const RouteKeyChip: Component<RouteKeyChipProps> = (props) => {
                   if (!target) return false;
                   if (!current) return true;
                   // The wallet already serves the pinned key: no write needed.
-                  if (wallet.key_labels.some((keyLabel) => keyLabel.toLowerCase() === current.toLowerCase()))
+                  if (
+                    wallet.key_labels.some(
+                      (keyLabel) => keyLabel.toLowerCase() === current.toLowerCase(),
+                    )
+                  )
                     return false;
                   return current.toLowerCase() !== target.toLowerCase();
                 };
+                // READ-ONLY state of this wallet (architect decision DC1). The
+                // dropdown never offers a pause/unpause action.
+                const walletState = (): WalletState | undefined => walletStates()[wallet.wallet_id];
                 return (
                   <li>
                     <button
@@ -180,6 +206,13 @@ const RouteKeyChip: Component<RouteKeyChipProps> = (props) => {
                           {label() ? ` · ${label()}` : ''}
                         </span>
                       </span>
+                      <Show when={walletState()}>
+                        {(current) => (
+                          <WalletChip tone={stateTone(current().state)}>
+                            {stateLabel(current().state)}
+                          </WalletChip>
+                        )}
+                      </Show>
                     </button>
                   </li>
                 );

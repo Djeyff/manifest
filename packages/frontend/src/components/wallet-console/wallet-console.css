@@ -175,6 +175,18 @@
   background: hsl(var(--chart-4));
 }
 
+/* Wallet state chip (RET-776-C): the read-only pill in the tier-builder
+   wallet dropdowns. Colour is never the only signal — the label says it too. */
+.wc-chip--running .wc-chip__dot {
+  background: hsl(var(--success));
+}
+.wc-chip--paused .wc-chip__dot {
+  background: hsl(var(--warning));
+}
+.wc-chip--parked .wc-chip__dot {
+  background: hsl(var(--muted-foreground));
+}
+
 /* ── Callout ────────────────────────────────────────────────────────────── */
 .wc-callout {
   display: flex;
